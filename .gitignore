@@ -1,0 +1,41 @@
+build/
+build-*/
+build_sys/
+build_*/
+build_hash*/
+deps/
+model_data/
+.vscode/
+*.sh
+.ai/
+*.json
+src/*.json
+src/.cache
+heliox_exec
+# Internal docs (do not publish)
+docs/
+# Devenv
+.devenv*
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
+
+python_lib/__pycache__/
+__pycache__/
+*.pyc
+python_lib/*.so
+
+# Internal tutorials
+src/mech/AI看的mech翻译教程.md
+python_lib/mod/
+python_lib/x86_64/
+python_lib/output/
+python_lib/vecplay_quickstart_output
+output/
+x86_64/
+*.png
+milestones_20260118/
