@@ -8,6 +8,7 @@
 #include "coredat_structs.h"
 #include "mechanism.h"
 #include "global_vars.h"
+#include "ion_table.h"
 
 using namespace coreneuron;
 
@@ -132,8 +133,8 @@ void alloc_mech(CoreMechData *mech_data, int n)
 }
 void ion_reg(const char *iname, double charge)
 {
-    printf_debug("TODO: reg ion [%s][%lf]\n", iname, charge);
-    // TODO:后续需要加吗？
+    register_ion_meta_from_valence(iname, charge);
+    printf_debug("reg ion [%s][%lf]\n", iname, charge);
 }
 void read_mech(CoreMechData *mech_data, const char *data_path)
 {
@@ -260,7 +261,7 @@ void read_filesdat(int &ngrp, int *&grp, int multiple, int *&imult, const char *
     FILE *fp = fopen(filesdat, "r");
     char version[256];
     fscanf(fp, "%s\n", version);
-    printf_debug("version in data base is:%s\tHelioX supports:1.8\n", version);
+    printf_debug("version in data base is:%s\tNeuronG supports:1.8\n", version);
     int iNumFiles = 0;
 
     //读取文件个数
@@ -545,7 +546,7 @@ void determine_inputpresyn(unique_ptr<CoreData *[]> &coredata_arr, int ncoredat)
         {
             NetCon *nc = coredata->netcon_arr + i;
             int gid = coredata->netcon_srcgid[i];//这个for循环在遍历所有的gid
-            // Note:这原本有一个和nt的负tid相关的操作，由于HelioX里面实现不同，所以不需要操作
+            // Note:这原本有一个和nt的负tid相关的操作，由于NeuronG里面实现不同，所以不需要操作
 
             //源GID有两种，一种是内部的PreSyn，另一种是其他线程的，叫InputPreSyn
             CorePreSyn *ps;
@@ -671,7 +672,7 @@ void read_phase2(CoreData *&coredata, int fileid, int imult, const char *datapat
         coredata->map_type2mechptr[i] = nullptr;
     }
 
-    for (int i = 0; i < nmech; i++) // HelioX的第一步采用的是链表存储，初始化链表
+    for (int i = 0; i < nmech; i++) // NeuronG的第一步采用的是链表存储，初始化链表
     {
         CoreMech *ml = new CoreMech();
         ml->type = mech_types[i];        // 链表上每个节点存的数据
@@ -943,7 +944,7 @@ void read_phase2(CoreData *&coredata, int fileid, int imult, const char *datapat
             // int type = ix - index * 100;//???怎么改成100了，原本是1000
 
             int index = ix / user_mod_num;        // line 1321
-            int type = ix - index * user_mod_num; // HelioX 自带的测试模型，他把生成时候的改成了100，而默认应该是1000
+            int type = ix - index * user_mod_num; // NeuronG 自带的测试模型，他把生成时候的改成了100，而默认应该是1000
 
             PointProcess *pnt = coredata->pntprocs + (pnt_offset[type] + index);
             presyn->pntsrc = pnt;
@@ -1118,13 +1119,11 @@ void read_phase2(CoreData *&coredata, int fileid, int imult, const char *datapat
         vecPlay.ubound_index = read_int(fp);
     }
     coredata->patstim_index = read_int(fp);
-    printf("patstim_index=%d\n", coredata->patstim_index);
 
     assert(read_int(fp) == -1);
     for (int i = 0; i < coredata->n_presyn; ++i)
     {
         coredata->preSynConditionEventFlags.push_back(read_int(fp));
-        printf("preSynConditionEventFlags[%d]=%d\n", i, coredata->preSynConditionEventFlags[i]);
     }
 
     assert(read_int(fp) == -1);

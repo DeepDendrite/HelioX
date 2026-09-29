@@ -4,12 +4,23 @@
 #include "philox.h"
 #include "nrnran123.h"
 #include "magic_enum/magic_enum.hpp"
+#include "mech_var_table.h"
 
 using namespace std;
+
+REGISTER_MECHANISM("NetStim", NetStim);
 
 NetStim::NetStim(MechInitParams &param) : ArtiCell(param)
 {
     need_area = true;
+    vecdata_interval = nullptr;
+    vecdata_number = nullptr;
+    vecdata_start = nullptr;
+    vecdata_noise = nullptr;
+    vecdata_event = nullptr;
+    vecdata_on = nullptr;
+    vecdata_ispike = nullptr;
+    rng_state = nullptr;
     printf_debug("NetStim Param: node_count: %d\n", param.node_count);
 
 }
@@ -50,6 +61,11 @@ NetStim::~NetStim()
     {
         delete vecdata_ispike;
         vecdata_ispike = nullptr;
+    }
+    if (rng_state)
+    {
+        delete rng_state;
+        rng_state = nullptr;
     }
 }
 
@@ -105,6 +121,34 @@ void NetStim::reg_node_indices(MechInitParams &param)
         vecdata_on->update_gpu_data_from_cpu();
         vecdata_ispike->update_gpu_data_from_cpu();
     }
+
+    auto& var_map = mech_var_table[param.type];
+    var_map.clear();
+
+    auto register_var = [&](int core_idx, const char* suffix, VecData<double>* vec) {
+        if (vec == nullptr) {
+            return;
+        }
+        MechVarData var_data;
+        var_data.name = this->name + "_" + std::string(suffix);
+        var_data.len = vec->size();
+        var_data.cpu_data = vec->get_cpu_data();
+        var_data.vecdata = vec;
+        if (mode == GPU) {
+            var_data.gpu_data = vec->get_gpu_data();
+        }
+        var_map[core_idx] = var_data;
+    };
+
+    // CoreData column indices: interval(0), number(1), start(2), noise(3),
+    // event(4), on(5), ispike(6)
+    register_var(0, "interval", vecdata_interval);
+    register_var(1, "number", vecdata_number);
+    register_var(2, "start", vecdata_start);
+    register_var(3, "noise", vecdata_noise);
+    register_var(4, "event", vecdata_event);
+    register_var(5, "on", vecdata_on);
+    register_var(6, "ispike", vecdata_ispike);
 }
 
 void NetStim::set_seed(int x) {

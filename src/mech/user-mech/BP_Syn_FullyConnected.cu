@@ -53,6 +53,10 @@ public:
         // acc_grad = 0
         vars(is_learning) = 0.0;
         vars(acc_grad) = 0.0;
+        vars(grad_from_next) = 0.0;
+        vars(grad_to_prev) = 0.0;
+        vars(PI) = 0.0;
+        vars(i) = 0.0;
     }
 
     // 电流计算函数：对应MOD文件的BREAKPOINT块

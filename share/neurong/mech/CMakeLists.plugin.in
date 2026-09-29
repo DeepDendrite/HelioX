@@ -1,0 +1,41 @@
+cmake_minimum_required(VERSION 3.20)
+project(NeuronGUserMechs LANGUAGES CXX CUDA)
+
+include("@NEURONG_TOOLCHAIN_CONTRACT@")
+
+find_package(NeuronGSDK CONFIG REQUIRED PATHS "@NEURONG_CMAKE_PACKAGE_DIR@" NO_DEFAULT_PATH)
+
+set(NEURONG_GENERATED_PLUGIN_INIT "@NEURONG_GENERATED_PLUGIN_INIT@")
+
+file(GLOB MECH_SOURCES CONFIGURE_DEPENDS
+    "@NEURONG_MECH_SOURCE_DIR@/*.cpp"
+    "@NEURONG_MECH_SOURCE_DIR@/*.cu"
+)
+
+if(NEURONG_GENERATED_PLUGIN_INIT)
+    list(APPEND MECH_SOURCES "${NEURONG_GENERATED_PLUGIN_INIT}")
+endif()
+
+if(NOT MECH_SOURCES)
+    message(FATAL_ERROR "No plugin source files found in: @NEURONG_MECH_SOURCE_DIR@")
+endif()
+
+add_library(neurong_user_mechs SHARED ${MECH_SOURCES})
+target_compile_definitions(neurong_user_mechs PRIVATE
+    NEURONG_SDK_BUILDING_PLUGIN
+    NEURONG_DISABLE_STATIC_MECH_REGISTRATION
+)
+target_link_libraries(neurong_user_mechs PRIVATE
+    NeuronG::SDKHeaders
+    NeuronG::SharedMech
+    NeuronG::MechTemplate
+    NeuronG::SDKBuildContract
+    NeuronG::Runtime
+)
+target_compile_options(neurong_user_mechs PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=20040>")
+set_target_properties(neurong_user_mechs PROPERTIES
+    OUTPUT_NAME "@NEURONG_MECH_OUTPUT_NAME@"
+    LIBRARY_OUTPUT_DIRECTORY "@NEURONG_MECH_OUTPUT_DIR@"
+    RUNTIME_OUTPUT_DIRECTORY "@NEURONG_MECH_OUTPUT_DIR@"
+    BUILD_RPATH "$<TARGET_FILE_DIR:NeuronG::Runtime>"
+)

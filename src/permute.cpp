@@ -88,7 +88,7 @@ static int permute_node_index_canonical(int raw, int nnode, const int* node_perm
 
     // NOTE:
     // - CoreNEURON stores some dparam indices as offsets into NrnThread::_data.
-    // - HELIOX does not preserve that monolithic layout; we canonicalize node-referential
+    // - NEURONG does not preserve that monolithic layout; we canonicalize node-referential
     //   semantics into direct node indices.
     // - For the legacy encoding "base + node_index", a robust decode is `node = raw % nnode`.
     int node_index = raw % nnode;
@@ -298,7 +298,7 @@ void update_pdata_values(coreneuron::CoreMech* ml, coreneuron::CoreData* coredat
     int* node_permute_vec = coredata->permute; // maps original node index -> permuted node index
 
     // If we have dparam semantics, we can fix up non-POINTER dparam indices too (area/diam/ion).
-    // This mirrors CoreNEURON's intent, but uses HELIOX's canonical encoding where node targets
+    // This mirrors CoreNEURON's intent, but uses NEURONG's canonical encoding where node targets
     // are stored as direct node indices.
     const int inst_count = ml->nodecount;
     if (inst_count <= 0) {
@@ -365,7 +365,7 @@ void update_pdata_values(coreneuron::CoreMech* ml, coreneuron::CoreData* coredat
                     }
                 } else {
                     // Other semantics (pntproc, cvodeieq, watch, etc.) are either stable under
-                    // permutation or currently unused in HELIOX. Leave unchanged.
+                    // permutation or currently unused in NEURONG. Leave unchanged.
                 }
             }
         }
@@ -427,15 +427,6 @@ void update_pdata_values(coreneuron::CoreMech* ml, coreneuron::CoreData* coredat
     // This permutes blocks of size ptr_slots per mechanism instance.
     permute(ml->pointer2type.data(), inst_count, ptr_slots, ml->permute);
 
-    const bool debug_this_mech =
-#ifdef DEBUG_PRINTF
-        (::getenv("HELIOX_DEBUG_POINTER") != nullptr &&
-         type >= 0 && type < static_cast<int>(coredata->mech_data->name_vec.size()) &&
-         coredata->mech_data->name_vec[type] == "gapjunction_lr");
-#else
-        false;
-#endif
-
     for (int inst = 0; inst < inst_count; ++inst) {
         for (int pslot = 0; pslot < ptr_slots; ++pslot) {
             const int ip = pointer_slots[pslot];
@@ -450,11 +441,6 @@ void update_pdata_values(coreneuron::CoreMech* ml, coreneuron::CoreData* coredat
 
             const int target_type = ml->pointer2type[inst * ptr_slots + pslot];
 
-            if (debug_this_mech && inst < 8) {
-                printf_debug("update_pdata_values[%s]: inst=%d dparam=%d raw(before)=%d target_type=%d\n",
-                             coredata->mech_data->name_vec[type].c_str(), inst, ip, raw, target_type);
-            }
-
             if (is_node_pointer_target_type(target_type)) {
                 // Node-level targets: apply node permutation.
                 int node_index = raw;
@@ -467,7 +453,7 @@ void update_pdata_values(coreneuron::CoreMech* ml, coreneuron::CoreData* coredat
                     node_index = node_permute_vec[node_index];
                 }
 
-                // HELIOX canonical convention for node-level POINTERs: direct node index.
+                // NEURONG canonical convention for node-level POINTERs: direct node index.
                 raw = node_index;
             } else if (target_type > 0 && target_type < coredata->mech_data->nmech_type) {
                 // Mechanism-level target:
@@ -510,11 +496,6 @@ void update_pdata_values(coreneuron::CoreMech* ml, coreneuron::CoreData* coredat
                 }
             } else {
                 // Unknown/unhandled target type. Leave unchanged.
-            }
-
-            if (debug_this_mech && inst < 8) {
-                printf_debug("update_pdata_values[%s]: inst=%d dparam=%d raw(after)=%d\n",
-                             coredata->mech_data->name_vec[type].c_str(), inst, ip, raw);
             }
         }
     }

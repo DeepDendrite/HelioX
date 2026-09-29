@@ -72,7 +72,7 @@ struct MechTrait {
         has_stdp,      // 54
         fa_error,      // 55
         v,             // 56
-        _g             // 57 (HelioX 中并不一定必须用到，但这里为了对齐 NEURON 的下标，也保留)
+        _g             // 57 (DeepDendrite 中并不一定必须用到，但这里为了对齐 NEURON 的下标，也保留)
     };
 
     // 本例无离子变量 IonVarNames，省略

@@ -62,6 +62,13 @@ public:
     // 初始化函数：对应INITIAL块
     DUAL_EXEC void init_single_node(MechTempInitParam &param, VarAccessor<MechTrait> &vars) {
         vars(is_learning) = 0.0;
+        vars(s_sum) = 0.0;
+
+        int n_out = static_cast<int>(vars(n_outputs));
+        for (int j = 0; j < n_out; j++) {
+            vars.Arr(s, j) = 0.0;
+            vars.Arr(grad_to_prev, j) = 0.0;
+        }
     }
 
     // 电流计算函数：对应BREAKPOINT块
@@ -93,6 +100,11 @@ public:
             for (int j = 0; j < n_out; j++) {
                 // CrossEntropy + SoftMax 的梯度就是 s[j] - tgt[j]
                 vars.Arr(grad_to_prev, j) = vars.Arr(s, j) - vars.Arr(tgt, j);
+            }
+        } else {
+            // Keep gradient buffer deterministic outside learning window.
+            for (int j = 0; j < n_out; j++) {
+                vars.Arr(grad_to_prev, j) = 0.0;
             }
         }
 

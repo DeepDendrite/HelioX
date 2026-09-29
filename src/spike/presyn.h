@@ -15,7 +15,7 @@ class PreSyn
 {
     public:
         uint32_t npre;//真实presyn的个数
-        PreSyn(uint32_t n, SpikeVector* vec);
+        PreSyn(Mode mode, uint32_t n, SpikeVector* vec);
         PreSyn(Mode mode, uint32_t n, SpikeVector* vec, 
                const vector<int> &pre_node_indices, 
                const vector<double> &threshold, 
@@ -44,24 +44,6 @@ class PreSyn
         void threshold_detect_cpu(double* vec_v, SpikeFlag* spk_flags, double t, vector<pair<double, int>> &rec_spk);
         int threshold_detect_gpu(double* vec_v, VecData<SpikeFlag>* spk_flags, double t, vector<pair<double, int>> &rec_spk);
 
-        // Optional profiling (disabled by default; keep overhead minimal when off).
-        void set_spike_profile_enabled(bool enable) { spike_profile_enabled_ = enable; }
-        bool is_spike_profile_enabled() const { return spike_profile_enabled_; }
-
-        struct SpikeProfileStats {
-            uint64_t steps = 0;
-            uint64_t steps_with_presyn_spike = 0;
-            uint64_t presyn_spike_total = 0;
-            int presyn_spike_max = 0;
-            // Histogram for presyn spikes per step:
-            // bucket[i] = count of steps with exactly i spikes, for i in [0,63]
-            // bucket[63] also accumulates ">=63" to keep it bounded.
-            std::array<uint64_t, 64> presyn_spike_hist{};
-        };
-
-        const SpikeProfileStats& spike_profile_stats() const { return spike_profile_stats_; }
-        void reset_spike_profile_stats() { spike_profile_stats_ = SpikeProfileStats{}; }
-
         // Spike detect (GPU) fast path:
         // - Use a non-blocking CUDA stream + event for spike detection work.
         // - Only copy back full spk flags / indices when spk_num_real > 0.
@@ -74,10 +56,6 @@ class PreSyn
         int* spk_num_tot = nullptr;   // host-pinned: total spikes (legacy semantics)
         int* d_spk_num_real = nullptr; // device counter
         int* d_spk_num_tot = nullptr;  // device counter
-
-    private:
-        bool spike_profile_enabled_ = false;
-        SpikeProfileStats spike_profile_stats_{};
 };
 
 #endif

@@ -1,8 +1,8 @@
 // iclamp_templated mechanism - auto-registered via whole-archive linking
 #include "mech_template.cuh"
-#include <cstdio>
 
 namespace ICLAMP{
+
     
 struct MechTrait{
     enum class VarNames{
@@ -12,7 +12,10 @@ struct MechTrait{
 class ICLAMP_Templated:public MechTemp<ICLAMP_Templated,MechTrait>{
 public:
 using enum MechTrait::VarNames;
-    constexpr static MechFlags flags = ENABLE_INIT | ENABLE_CURRENT | POINT_PROCESS | ELECTRODE_CURRENT;
+    constexpr static MechFlags flags =
+        ENABLE_INIT | ENABLE_CURRENT | POINT_PROCESS | ELECTRODE_CURRENT | ENABLE_CURRENT_VJP;
+    // NOTE: scalar learnable vars only for now; array learnable vars are intentionally unsupported.
+    static constexpr auto LearnableVars = std::array{amp};
 
     ICLAMP_Templated(MechInitParams &param):MechTemp(param){
         need_area = true;
@@ -38,6 +41,17 @@ using enum MechTrait::VarNames;
         vars(i) = _current;
         return _current;
     };
+
+    DUAL_EXEC void current_vjp_single_node(MechTempCurVJPParam& param, VarAccessor<MechTrait> vars) {
+        vars.idx = param.idx;
+        const double del = vars(delay);
+        const double dur_value = vars(dur);
+        if (!(param.t >= del && param.t < del + dur_value)) {
+            return;
+        }
+        // IClamp current law: i = amp (inside active window), so local pullback is identity.
+        mechAtomAdd(&grad_ref<amp>(param, vars), param.grad_mech_current);
+    }
 };
 
 REGISTER_MECHANISM("IClamp",ICLAMP_Templated);

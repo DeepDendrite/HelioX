@@ -17,6 +17,9 @@ class PostSyn_trait
         virtual ~PostSyn_trait();
         virtual bool net_receive_cpu(double t) = 0; //NET_RECEIVE part in .mod file
         virtual bool net_receive_gpu(double t) = 0; //NET_RECEIVE part in .mod file
+        virtual bool supports_spike_vjp() const { return false; }
+        virtual void spike_vjp_cpu(SimPostSynSpikeVJPParam& param) { (void)param; }
+        virtual void spike_vjp_gpu(SimPostSynSpikeVJPParam& param) { (void)param; }
         ///下面这两个函数已经在trait中实现了，子类不需要再实现
         void post_spike_receive_cpu(double t);//从优先队列中弹出当前时间段可处理的spike,并放到receive_idx_vec中，并设置flag
         void post_spike_receive_gpu(double t);//当前版本会调用CPU版，只是多了把数据同步到GPU的操作
@@ -27,6 +30,7 @@ class PostSyn_trait
         int get_receive_count() const { return receive_count; }
 
         VecData<double> *vecdata_delay, *vecdata_weights;
+        VecData<int>* vecdata_delay_steps;
         VecData<uint32_t>* vecdata_spk_vec_idx; // corresponding index in spike_vector, size: nodecount
         SpikeBuffer spike_buffer;
 

@@ -4,9 +4,34 @@
 #include <nvtx3/nvToolsExt.h>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
+
+namespace {
+static bool should_use_pinned_host_alloc() {
+    // AddressSanitizer reserves huge shadow memory mappings; CUDA pinned allocations
+    // (cudaHostAlloc/cudaMallocHost) can fail or behave unexpectedly. Prefer plain
+    // heap allocations under ASAN to keep debugging usable.
+#if defined(__SANITIZE_ADDRESS__)
+    return false;
+#else
+    return true;  // pinned host allocation (historical default)
+#endif
+}
+
+static size_t round_up(size_t n, size_t align) {
+    return (n + align - 1) / align * align;
+}
+}  // namespace
 
 void gpu_mem_allocate(void** arr, size_t size)
 {
+    if (arr == nullptr) {
+        return;
+    }
+    if (size == 0) {
+        *arr = nullptr;
+        return;
+    }
     cudaError_t err = cudaMalloc(arr, size);
     if (err != cudaSuccess) {
         fprintf(stderr, "FATAL ERROR: cudaMalloc failed!\n");
@@ -26,6 +51,13 @@ void gpu_mem_allocate(void** arr, size_t size)
 
 void managed_mem_allocate(void** arr, int size)
 {
+    if (arr == nullptr) {
+        return;
+    }
+    if (size <= 0) {
+        *arr = nullptr;
+        return;
+    }
     cudaError_t err = cudaMallocManaged(arr, size);
     if (err != cudaSuccess) {
         fprintf(stderr, "FATAL ERROR: cudaMallocManaged failed!\n");
@@ -45,19 +77,46 @@ void managed_mem_allocate(void** arr, int size)
 
 void gpu_mem_free(void** arr)
 {
+    if (arr == nullptr || *arr == nullptr) {
+        return;
+    }
     cudaFree(*arr);
-    //*arr = NULL;
+    *arr = nullptr;
 }
 
 void managed_mem_free(void** arr)
 {
+    if (arr == nullptr || *arr == nullptr) {
+        return;
+    }
     cudaFree(*arr);
-    //*arr = NULL;
+    *arr = nullptr;
 }
 
 void cpu_mem_allocate(void** arr, int size)
 {
-    assert(size > 0);
+    if (arr == nullptr) {
+        return;
+    }
+    if (size <= 0) {
+        *arr = nullptr;
+        return;
+    }
+    if (!should_use_pinned_host_alloc()) {
+        // Use regular heap allocation (aligned) for CPU-only / sanitizer builds.
+        void* p = nullptr;
+        constexpr size_t kAlign = 64;
+        const size_t nbytes = round_up(static_cast<size_t>(size), kAlign);
+        if (posix_memalign(&p, kAlign, nbytes) != 0 || p == nullptr) {
+            fprintf(stderr, "FATAL ERROR: posix_memalign failed!\n");
+            fprintf(stderr, "  Size: %d bytes\n", size);
+            abort();
+        }
+        *arr = p;
+        memset(*arr, 0, static_cast<size_t>(size));
+        return;
+    }
+
     cudaError_t err = cudaHostAlloc(arr, size, cudaHostAllocDefault);
     if (err != cudaSuccess || *arr == nullptr) {
         fprintf(stderr, "FATAL ERROR: cudaHostAlloc failed!\n");
@@ -65,11 +124,24 @@ void cpu_mem_allocate(void** arr, int size)
         fprintf(stderr, "  Error: %s\n", cudaGetErrorString(err));
         abort();
     }
-    memset(*arr, 0, size);
+    memset(*arr, 0, static_cast<size_t>(size));
 }
 
 void cpu_mem_allocate_mapped(void** arr, int size)
 {
+    if (arr == nullptr) {
+        return;
+    }
+    if (size <= 0) {
+        *arr = nullptr;
+        return;
+    }
+    if (!should_use_pinned_host_alloc()) {
+        // Mapped pinned buffers don't make sense without pinned alloc; fall back.
+        cpu_mem_allocate(arr, size);
+        return;
+    }
+
     cudaError_t err = cudaHostAlloc(arr, size, cudaHostAllocMapped);
     if (err != cudaSuccess || *arr == nullptr) {
         fprintf(stderr, "FATAL ERROR: cudaHostAlloc (mapped) failed!\n");
@@ -77,13 +149,21 @@ void cpu_mem_allocate_mapped(void** arr, int size)
         fprintf(stderr, "  Error: %s\n", cudaGetErrorString(err));
         abort();
     }
-    memset(*arr, 0, size);
+    memset(*arr, 0, static_cast<size_t>(size));
 }
 
 void cpu_mem_free(void** arr)
 {
+    if (arr == nullptr || *arr == nullptr) {
+        return;
+    }
+    if (!should_use_pinned_host_alloc()) {
+        free(*arr);
+        *arr = nullptr;
+        return;
+    }
     cudaFreeHost(*arr);
-    //*arr = NULL;
+    *arr = nullptr;
 }
 void cuda_check_err_func(const char* file, int line){
     cuda_sync_all();
@@ -125,6 +205,10 @@ void mem_copy_gpu2gpu(void* dst, void* src, int size, void* cuda_stream)
 }
 
 extern "C" void cuda_stream_initialize(void** cuda_stream) {
+    if (cuda_stream == nullptr) {
+        return;
+    }
+    *cuda_stream = nullptr;
     cudaStream_t* stream = new cudaStream_t;
     cudaError_t err = cudaStreamCreate(stream);
     if (err != cudaSuccess) {
@@ -182,6 +266,10 @@ extern "C" void cuda_stream_destroy(void** cuda_stream) {
 }
 
 extern "C" void cuda_event_initialize(void** cuda_event) {
+    if (cuda_event == nullptr) {
+        return;
+    }
+    *cuda_event = nullptr;
     cudaEvent_t* event = new cudaEvent_t;
     cudaError_t err = cudaEventCreateWithFlags(event, cudaEventDisableTiming);
     if (err != cudaSuccess) {

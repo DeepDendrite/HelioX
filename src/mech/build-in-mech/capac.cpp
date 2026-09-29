@@ -2,6 +2,8 @@
 #include <string.h>
 #include "utils.h"
 
+REGISTER_MECHANISM("capacitance", Capac);
+
 Capac::Capac(MechInitParams &param) : Mechanism(param)
 {
     
@@ -82,4 +84,3 @@ void Capac::state_cpu(SimMechStateParam &param)
 {
     //do nothing
 }
-

@@ -6,6 +6,8 @@ PostSyn_trait::PostSyn_trait()
     receive_count = 0;
     vecdata_receive_idx_vec = nullptr;
     vecdata_weights = nullptr;
+    vecdata_delay = nullptr;
+    vecdata_delay_steps = nullptr;
     vecdata_spike_flag = nullptr;
     vecdata_spk_vec_idx = nullptr;
 }
@@ -21,6 +23,16 @@ PostSyn_trait::~PostSyn_trait()
     {
         delete vecdata_weights;
         vecdata_weights = nullptr;
+    }
+    if (vecdata_delay)
+    {
+        delete vecdata_delay;
+        vecdata_delay = nullptr;
+    }
+    if (vecdata_delay_steps)
+    {
+        delete vecdata_delay_steps;
+        vecdata_delay_steps = nullptr;
     }
     if (vecdata_spike_flag)
     {
@@ -76,6 +88,7 @@ void PostSyn_trait::init_vecdatas(MechInitParams &param)
     auto mode = param.mode;
     vecdata_weights = new VecData<double>(mode, 0.0, node_count);
     vecdata_delay = new VecData<double>(mode, 0.0, node_count);
+    vecdata_delay_steps = new VecData<int>(mode, 0, node_count);
     vecdata_spk_vec_idx = new VecData<uint32_t>(mode, (uint32_t)0, node_count);
     vecdata_spike_flag = new VecData<SpikeFlag>(mode, SpikeFlag::INVALID, node_count);
     vecdata_receive_idx_vec = new VecData<uint32_t>(mode, (uint32_t)0, node_count);

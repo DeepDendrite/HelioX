@@ -94,14 +94,14 @@ namespace MonitorParser
 
 int main(int argc, char *argv[])
 {
-    cxxopts::Options options("heliox", "A Simple Neuron Simulator");
+    cxxopts::Options options("neurong", "A Simple Neuron Simulator");
     options.add_options()
         ("d,dir", "Model Dir", cxxopts::value<std::string>())
         ("m,mode", "mode, gpu/cpu", cxxopts::value<std::string>()->default_value("cpu"))
         ("p,permute_type", "permute_type,0-3", cxxopts::value<int>()->default_value("0"))
         ("t,tstop", "tstop", cxxopts::value<double>()->default_value("100"))
         ("dt", "dt", cxxopts::value<double>()->default_value("0.025"))
-        ("mod_num", "mod_num, heliox old models set to 100, otherwise, 1000", cxxopts::value<int>()->default_value("1000"))
+        ("mod_num", "mod_num, neurong old models set to 100, otherwise, 1000", cxxopts::value<int>()->default_value("1000"))
         ("nthread_each_cell", "thread budget per cell when splitting (permute_type=3, <=32)", cxxopts::value<int>())
         ("h,help", "Print usage")
         ("init_volt", "init voltage",cxxopts::value<double>()->default_value("-65"))

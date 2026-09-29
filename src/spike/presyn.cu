@@ -65,6 +65,25 @@ extern "C" void cuda_spike_send_async(double* vec_v,
     cudaStream_t stream = cuda_stream ? *reinterpret_cast<cudaStream_t*>(cuda_stream) : static_cast<cudaStream_t>(0);
     cudaEvent_t event = cuda_event ? *reinterpret_cast<cudaEvent_t*>(cuda_event) : static_cast<cudaEvent_t>(nullptr);
 
+    if (len <= 0 || tot_len <= 0) {
+        if (h_spk_num_real) {
+            *h_spk_num_real = 0;
+        }
+        if (h_spk_num_tot) {
+            *h_spk_num_tot = 0;
+        }
+        if (d_spk_num_real) {
+            cudaMemsetAsync(d_spk_num_real, 0, sizeof(int), stream);
+        }
+        if (d_spk_num_tot) {
+            cudaMemsetAsync(d_spk_num_tot, 0, sizeof(int), stream);
+        }
+        if (event != nullptr) {
+            cudaEventRecord(event, stream);
+        }
+        return;
+    }
+
     // Reset device counters asynchronously (no device-wide sync).
     cudaMemsetAsync(d_spk_num_real, 0, sizeof(int), stream);
     cudaMemsetAsync(d_spk_num_tot, 0, sizeof(int), stream);

@@ -160,6 +160,6 @@ public:
 };
 
 // Register mechanism with name matching MOD file SUFFIX
-REGISTER_MECHANISM("NaTg", NaTg_Channel);
+REGISTER_MECHANISM("NaTg_origin", NaTg_Channel);
 
 } // namespace NaTg

@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <tuple>
 #include <memory>
+#include <algorithm>
+#include <cctype>
 
 // 主模板：对普通类型
 template<typename T>
@@ -32,9 +34,38 @@ struct convert_any_helper {
         if (a.type() == typeid(long)) {
             return static_cast<T>(std::any_cast<long>(a));
         }
+        if (a.type() == typeid(bool)) {
+            return static_cast<T>(std::any_cast<bool>(a));
+        }
         // 其他类型可以继续加
 
         throw std::runtime_error("bad any cast: 20 type=" + std::string(a.type().name()));
+    }
+};
+
+template<>
+struct convert_any_helper<std::string> {
+    static std::string from(const std::any& a) {
+        if (a.type() == typeid(std::string)) {
+            return std::any_cast<std::string>(a);
+        }
+        if (a.type() == typeid(const char*)) {
+            return std::string(std::any_cast<const char*>(a));
+        }
+        throw std::runtime_error("bad any cast: string type=" + std::string(a.type().name()));
+    }
+};
+
+template<>
+struct convert_any_helper<bool> {
+    static bool from(const std::any& a) {
+        if (a.type() == typeid(bool)) {
+            return std::any_cast<bool>(a);
+        }
+        if (a.type() == typeid(int)) {
+            return std::any_cast<int>(a) != 0;
+        }
+        throw std::runtime_error("bad any cast: bool type=" + std::string(a.type().name()));
     }
 };
 
@@ -126,4 +157,178 @@ public:
 
 private:
     std::unordered_map<std::string, std::unique_ptr<FunctionWrapper>> funcs;
+};
+
+class StaticInterfaceRegistry {
+public:
+    struct Property {
+        std::function<std::any()> getter;
+        std::function<void(const std::any&)> setter;
+    };
+
+    static StaticInterfaceRegistry& getInstance() {
+        static StaticInterfaceRegistry instance;
+        return instance;
+    }
+
+    template<typename GetterR, typename SetterArg>
+    void register_property(const std::string& mech_name,
+                           const std::string& property_name,
+                           std::function<GetterR()> getter,
+                           std::function<void(SetterArg)> setter) {
+        Property prop;
+        prop.getter = [getter = std::move(getter)]() -> std::any {
+            return getter();
+        };
+        prop.setter = [setter = std::move(setter)](const std::any& value) {
+            setter(convert_any<SetterArg>(value));
+        };
+        properties_[mech_name][property_name] = std::move(prop);
+    }
+
+    template<typename GetterR>
+    void register_readonly_property(const std::string& mech_name,
+                                    const std::string& property_name,
+                                    std::function<GetterR()> getter) {
+        Property prop;
+        prop.getter = [getter = std::move(getter)]() -> std::any {
+            return getter();
+        };
+        properties_[mech_name][property_name] = std::move(prop);
+    }
+
+    template<typename R, typename... Args>
+    void register_method(const std::string& mech_name,
+                         const std::string& method_name,
+                         std::function<R(Args...)> func) {
+        methods_[mech_name][method_name] = std::make_unique<ConcreteFunction<R, Args...>>(std::move(func));
+    }
+
+    bool has_interface(const std::string& mech_name) const {
+        return properties_.find(mech_name) != properties_.end() || methods_.find(mech_name) != methods_.end();
+    }
+
+    std::string resolve_interface(const std::string& query) const {
+        if (has_interface(query)) {
+            return query;
+        }
+        const std::string lowered = to_lower(query);
+        for (const auto& name : list_interfaces()) {
+            if (to_lower(name) == lowered) {
+                return name;
+            }
+        }
+        return "";
+    }
+
+    bool has_property(const std::string& mech_name, const std::string& property_name) const {
+        auto mech_it = properties_.find(mech_name);
+        if (mech_it == properties_.end()) {
+            return false;
+        }
+        return mech_it->second.find(property_name) != mech_it->second.end();
+    }
+
+    bool has_method(const std::string& mech_name, const std::string& method_name) const {
+        auto mech_it = methods_.find(mech_name);
+        if (mech_it == methods_.end()) {
+            return false;
+        }
+        return mech_it->second.find(method_name) != mech_it->second.end();
+    }
+
+    std::any get_property(const std::string& mech_name, const std::string& property_name) const {
+        auto mech_it = properties_.find(mech_name);
+        if (mech_it == properties_.end()) {
+            throw std::runtime_error("static interface not found: " + mech_name);
+        }
+        auto prop_it = mech_it->second.find(property_name);
+        if (prop_it == mech_it->second.end()) {
+            throw std::runtime_error("static property not found: " + mech_name + "." + property_name);
+        }
+        if (!prop_it->second.getter) {
+            throw std::runtime_error("static property is write-only: " + mech_name + "." + property_name);
+        }
+        return prop_it->second.getter();
+    }
+
+    void set_property(const std::string& mech_name, const std::string& property_name, const std::any& value) const {
+        auto mech_it = properties_.find(mech_name);
+        if (mech_it == properties_.end()) {
+            throw std::runtime_error("static interface not found: " + mech_name);
+        }
+        auto prop_it = mech_it->second.find(property_name);
+        if (prop_it == mech_it->second.end()) {
+            throw std::runtime_error("static property not found: " + mech_name + "." + property_name);
+        }
+        if (!prop_it->second.setter) {
+            throw std::runtime_error("static property is read-only: " + mech_name + "." + property_name);
+        }
+        prop_it->second.setter(value);
+    }
+
+    std::any call_method(const std::string& mech_name, const std::string& method_name, const std::vector<std::any>& args) const {
+        auto mech_it = methods_.find(mech_name);
+        if (mech_it == methods_.end()) {
+            throw std::runtime_error("static interface not found: " + mech_name);
+        }
+        auto method_it = mech_it->second.find(method_name);
+        if (method_it == mech_it->second.end()) {
+            throw std::runtime_error("static method not found: " + mech_name + "." + method_name);
+        }
+        return method_it->second->call(args);
+    }
+
+    std::vector<std::string> list_interfaces() const {
+        std::vector<std::string> names;
+        names.reserve(properties_.size() + methods_.size());
+        for (const auto& [name, _] : properties_) {
+            names.push_back(name);
+        }
+        for (const auto& [name, _] : methods_) {
+            if (std::find(names.begin(), names.end(), name) == names.end()) {
+                names.push_back(name);
+            }
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    }
+
+    std::vector<std::string> list_properties(const std::string& mech_name) const {
+        std::vector<std::string> names;
+        auto mech_it = properties_.find(mech_name);
+        if (mech_it == properties_.end()) {
+            return names;
+        }
+        for (const auto& [name, _] : mech_it->second) {
+            names.push_back(name);
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    }
+
+    std::vector<std::string> list_methods(const std::string& mech_name) const {
+        std::vector<std::string> names;
+        auto mech_it = methods_.find(mech_name);
+        if (mech_it == methods_.end()) {
+            return names;
+        }
+        for (const auto& [name, _] : mech_it->second) {
+            names.push_back(name);
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    }
+
+private:
+    static std::string to_lower(const std::string& input) {
+        std::string out = input;
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return out;
+    }
+
+    std::unordered_map<std::string, std::unordered_map<std::string, Property>> properties_;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::unique_ptr<FunctionWrapper>>> methods_;
 };

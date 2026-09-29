@@ -9,7 +9,7 @@
 // - Keep this header independent from nanobind/Python.
 // - Prefer simple POD structs and enums that can be used across frontends.
 
-namespace heliox::runtime_api::core {
+namespace neurong::runtime_api::core {
 
 struct MonitorKey {
     std::string mech;
@@ -18,5 +18,5 @@ struct MonitorKey {
     int32_t array_index = 0;
 };
 
-}  // namespace heliox::runtime_api::core
+}  // namespace neurong::runtime_api::core
 

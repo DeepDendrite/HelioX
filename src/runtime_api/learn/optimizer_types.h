@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace heliox::runtime_api::learn {
+namespace neurong::runtime_api::learn {
 
 struct AdamParams {
     double beta1 = 0.9;
@@ -18,5 +18,5 @@ struct AdamState {
     AdamParams params;
 };
 
-}  // namespace heliox::runtime_api::learn
+}  // namespace neurong::runtime_api::learn
 

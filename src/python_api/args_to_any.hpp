@@ -78,3 +78,13 @@ inline std::vector<std::any> args_to_vector(Mode mode, const nb::args& args) {
     }
     return v;
 }
+
+inline std::vector<std::any> args_to_vector_no_mode(const nb::args& args) {
+    std::vector<std::any> v;
+    size_t args_len = args.size();
+    v.reserve(args_len);
+    for (size_t i = 0; i < args_len; ++i) {
+        v.emplace_back(to_any(args[i]));
+    }
+    return v;
+}

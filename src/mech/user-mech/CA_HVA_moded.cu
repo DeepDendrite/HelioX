@@ -149,7 +149,7 @@ public:
     }
 };
 
-// Register the mechanism with HelioX
+// Register the mechanism with DeepDendrite
 REGISTER_MECHANISM(MECH_NAME_TO_REG, MECH_CLASS_NAME);
 
 // Clean up macro definitions

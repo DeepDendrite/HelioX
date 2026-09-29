@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <type_traits>
 #include "utils.h"
 #include "magic_enum/magic_enum.hpp"
 #include "mechanism.h"
@@ -30,7 +31,8 @@ enum class MechFlags{
     ENABLE_STATE = 1 << 2,
     POINT_PROCESS = 1 << 3,
     ELECTRODE_CURRENT = 1 << 4,
-    WRITE_EION_IN_STATE = 1 << 5
+    WRITE_EION_IN_STATE = 1 << 5,
+    ENABLE_CURRENT_VJP = 1 << 6
 };
 template <typename T>
 concept EnumType = std::is_enum_v<T>;
@@ -52,8 +54,60 @@ __host__ __device__ void __forceinline__  mechAtomAdd(double* address, double va
     #endif
 }
 
+// Unified conversion from matrix-domain grad_rhs to mechanism-current adjoint.
+// NOTE:
+// - point-process uses area scaling (100/area)
+// - electrode current uses positive RHS sign; non-electrode current uses negative RHS sign
+DUAL_EXEC double mech_grad_current_from_rhs(
+    double grad_rhs,
+    bool point_process,
+    bool electrode_current,
+    double node_area)
+{
+    double grad_current = grad_rhs;
+    if (point_process) {
+        grad_current *= 1.0e2 / node_area;
+    }
+    return electrode_current ? grad_current : -grad_current;
+}
+
 
 template<typename T>
 concept MechTraitType = requires {
     typename T::VarNames;
 }&&std::is_enum_v<typename T::VarNames>;
+
+template <typename T, typename = void>
+struct mech_trait_supports_table : std::false_type
+{
+};
+
+template <typename T>
+struct mech_trait_supports_table<T, std::void_t<decltype(T::MechSupportsTable)>>
+    : std::bool_constant<static_cast<bool>(T::MechSupportsTable)>
+{
+};
+
+template <typename T>
+inline constexpr bool mech_trait_supports_table_v = mech_trait_supports_table<T>::value;
+
+struct TableViewEnabled
+{
+    const double* data = nullptr;
+    int point_count = 0;
+    int output_count = 0;
+    double tmin = 0.0;
+    double mfac = 0.0;
+    bool enabled = false;
+    const int* enabled_ptr = nullptr;
+    const double* tmin_ptr = nullptr;
+    const double* mfac_ptr = nullptr;
+};
+
+struct TableViewDisabled
+{
+};
+
+template <typename MechTrait>
+using VarAccessorTableView =
+    std::conditional_t<mech_trait_supports_table_v<MechTrait>, TableViewEnabled, TableViewDisabled>;

@@ -9,7 +9,7 @@
 
 #include "runtime_api/core/SimRuntimeCore.h"
 
-namespace heliox::runtime_api::learn {
+namespace neurong::runtime_api::learn {
 
 // Learning-oriented runtime helpers that are still "backend" code (CUDA buffers + kernels),
 // but are not part of the generic simulation API.
@@ -46,81 +46,6 @@ public:
                                 std::span<const int> output_v_handles,
                                 double tstop_ms,
                                 double v_init);
-
-    int replay_compute_dw_dx_from_signals_into(const float* it_lr_nt,
-                                               const float* ditdv_lr_nt,
-                                               const float* ditdvpre_lr_nt,
-                                               int N,
-                                               int T,
-                                               const float* dLtdv_lr_to,
-                                               int ksteps_total,
-                                               int n_output,
-                                               const int32_t* poutput,
-                                               const int32_t* pinput,
-                                               int n_input,
-                                               const int32_t* pre_of_col,
-                                               float* dw_out_n,
-                                               float* dx_lr_it,
-                                               double dt_ms,
-                                               bool percise,
-                                               double grad_scale,
-                                               double eps,
-                                               double grad_l2norm_threshold,
-                                               int clip_strategy,
-                                               int clip_check_every);
-
-    int simulate_and_replay_dw_dx_streaming_into(const float* dLtdv_lr_to,
-                                                 int ksteps_total,
-                                                 int n_output,
-                                                 const int32_t* poutput,
-                                                 const int32_t* pinput,
-                                                 int n_input,
-                                                 int N,
-                                                 const int32_t* pre_of_col,
-                                                 float* dw_out_n,
-                                                 float* dx_lr_it,
-                                                 std::span<const int> pure_i_handles,
-                                                 std::span<const int32_t> pure_i_dest,
-                                                 std::span<const float> pure_i_scale,
-                                                 std::span<const int> didv_handles,
-                                                 std::span<const int32_t> didv_dest,
-                                                 std::span<const float> didv_scale,
-                                                 std::span<const int> didvpre_handles,
-                                                 std::span<const int32_t> didvpre_dest,
-                                                 std::span<const float> didvpre_scale,
-                                                 double tstop_ms,
-                                                 int k_mul,
-                                                 bool percise,
-                                                 double v_init,
-                                                 double dt_ms,
-                                                 double grad_scale,
-                                                 double eps,
-                                                 double grad_l2norm_threshold,
-                                                 int clip_strategy,
-                                                 int clip_check_every);
-
-    int simulate_and_capture_mapped_signals_into(float* output_vs_tn,
-                                                 int total_steps_plus1,
-                                                 int n_output,
-                                                 float* it_lr_tn,
-                                                 float* ditdv_lr_tn,
-                                                 float* ditdvpre_lr_tn,
-                                                 int ksteps_total_plus1,
-                                                 int N,
-                                                 std::span<const int> output_v_handles,
-                                                 std::span<const int> pure_i_handles,
-                                                 std::span<const int32_t> pure_i_dest,
-                                                 std::span<const float> pure_i_scale,
-                                                 std::span<const int> didv_handles,
-                                                 std::span<const int32_t> didv_dest,
-                                                 std::span<const float> didv_scale,
-                                                 std::span<const int> didvpre_handles,
-                                                 std::span<const int32_t> didvpre_dest,
-                                                 std::span<const float> didvpre_scale,
-                                                 double tstop_ms,
-                                                 int k_mul,
-                                                 bool percise,
-                                                 double v_init);
 
     // Variant that caches it/ditdv/ditdvpre on-device (N,T) for later replay.
     // output_vs_tn: (total_steps+1, n_output)
@@ -163,7 +88,7 @@ public:
     // Replay dw only using cached signal buffers (no input gradient path).
     //
     // This exists to support tasks that do not train inputs (n_input == 0), while
-    // keeping the hot replay path fully inside the HELIOX backend.
+    // keeping the hot replay path fully inside the NEURONG backend.
     int replay_compute_dw_from_cached_signals_into(const float* dLtdv_lr_to,
                                                    int ksteps_total,
                                                    int n_output,
@@ -182,6 +107,16 @@ private:
     core::SimRuntimeCore& core_;
 
     bool get_cached_pointers_or_print_(int handle, double*& cpu_ptr, double*& gpu_ptr) const;
+    bool resolve_replay_dt_ms_(const char* fn_name, double dt_ms, double& out_dt_ms) const;
+    bool validate_replay_metadata_once_(const char* fn_name,
+                                        int N,
+                                        int n_output,
+                                        const int32_t* poutput,
+                                        int n_input,
+                                        const int32_t* pinput,
+                                        const int32_t* pre_of_col,
+                                        bool need_dx);
+    void invalidate_replay_metadata_cache_();
 
     int replay_compute_dw_dx_from_cached_signals_impl_(const float* dLtdv_lr_to,
                                                        int ksteps_total,
@@ -288,6 +223,14 @@ private:
     size_t replay_norm_partial_flags_bytes_ = 0;
     size_t replay_norm_sum_bytes_ = 0;
     size_t replay_norm_flag_bytes_ = 0;
+
+    // Cached validation metadata for replay index vectors (poutput/pinput/pre_of_col).
+    bool replay_metadata_cache_valid_ = false;
+    int replay_meta_N_ = 0;
+    int replay_meta_n_output_ = 0;
+    int replay_meta_n_input_ = 0;
+    bool replay_meta_need_dx_ = false;
+    uint64_t replay_meta_signature_ = 0;
 };
 
-}  // namespace heliox::runtime_api::learn
+}  // namespace neurong::runtime_api::learn

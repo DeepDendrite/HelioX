@@ -40,5 +40,3 @@ class NetStim : public ArtiCell
 
         nrnran123_State* rng_state;
 };
-
-REGISTER_MECHANISM("NetStim",NetStim);

@@ -2,8 +2,33 @@
 #include "postsyn_template.cuh"
 #include <cmath>
 #include <cassert>
+#include <array>
+#include <stdexcept>
 
 namespace SynRecord {
+
+__global__ void syn_record_spike_vjp_kernel(
+    int nnode,
+    const double* adj_ampa_a,
+    const double* adj_ampa_b,
+    const double* adj_nmda_a,
+    const double* adj_nmda_b,
+    const double* adj_gaba_a,
+    const double* adj_gaba_b,
+    const double* event_weight_tape,
+    int event_tape_step,
+    int event_tape_stride,
+    const double* syn_w,
+    const double* r_na,
+    const double* ampa_factor,
+    const double* nmda_factor,
+    const double* gaba_factor,
+    const uint32_t* spk_vec_idx,
+    const int* delay_steps,
+    double* pending_pre_spike_adj,
+    int pre_spike_adj_count,
+    int step_count,
+    int arrival_step);
 
 struct MechTrait {
     enum class VarNames {
@@ -24,7 +49,8 @@ struct MechTrait {
         NMDA_A, NMDA_B,
         GABA_A, GABA_B,
         /* -------- pre-computed factor (36-38) -------- */
-        AMPA_factor, NMDA_factor, GABA_factor
+        AMPA_factor, NMDA_factor, GABA_factor,
+        event_weight_pending, event_weight_cur
     };
 };
 
@@ -33,15 +59,47 @@ struct MechTrait {
  *-----------------------------------------------------------*/
 class SynRecord_Templated
         : public PostSynTemplate<SynRecord_Templated, MechTrait> {
+    using Base = PostSynTemplate<SynRecord_Templated, MechTrait>;
 
     using enum MechTrait::VarNames;
 
 public:
     constexpr static MechFlags flags =
-        ENABLE_INIT | ENABLE_CURRENT | ENABLE_STATE | POINT_PROCESS;
+        ENABLE_INIT | ENABLE_CURRENT | ENABLE_STATE | POINT_PROCESS | ENABLE_CURRENT_VJP;
+    static constexpr auto LearnableVars = std::array{w};
+    static constexpr auto VjpAdjointVars =
+        std::array{AMPA_A, AMPA_B, NMDA_A, NMDA_B, GABA_A, GABA_B};
+    static constexpr auto CurrentVjpTapeVars =
+        std::array{v_prev, AMPA_g, NMDA_g, GABA_g, event_weight_cur};
+
+    static consteval int w_learnable_slot() {
+        return Base::template learnable_var_index_constexpr_<MechTrait::VarNames::w>();
+    }
+    static consteval int adj_ampa_a_slot() {
+        return Base::template vjp_adjoint_var_index_constexpr_<MechTrait::VarNames::AMPA_A>();
+    }
+    static consteval int adj_ampa_b_slot() {
+        return Base::template vjp_adjoint_var_index_constexpr_<MechTrait::VarNames::AMPA_B>();
+    }
+    static consteval int adj_nmda_a_slot() {
+        return Base::template vjp_adjoint_var_index_constexpr_<MechTrait::VarNames::NMDA_A>();
+    }
+    static consteval int adj_nmda_b_slot() {
+        return Base::template vjp_adjoint_var_index_constexpr_<MechTrait::VarNames::NMDA_B>();
+    }
+    static consteval int adj_gaba_a_slot() {
+        return Base::template vjp_adjoint_var_index_constexpr_<MechTrait::VarNames::GABA_A>();
+    }
+    static consteval int adj_gaba_b_slot() {
+        return Base::template vjp_adjoint_var_index_constexpr_<MechTrait::VarNames::GABA_B>();
+    }
+    static consteval int event_weight_tape_slot() {
+        return Base::template current_vjp_tape_var_index_constexpr_<MechTrait::VarNames::event_weight_cur>();
+    }
 
     /* ---------------- ctor : register indexes ------------- */
-    SynRecord_Templated(MechInitParams& param) : PostSynTemplate(param) {
+    SynRecord_Templated(MechInitParams& param)
+            : PostSynTemplate(param) {
         /* ---- 0‒18: parameters from model file ---- */
         var_in_coredata_idx.insert({AMPA_tau1, 0});
         var_in_coredata_idx.insert({AMPA_tau2, 1});
@@ -94,11 +152,18 @@ public:
         init_values.insert({Dep,   0.0});
         init_values.insert({Fac,   0.0});
         init_values.insert({u0,    0.0});
+        init_values.insert({event_weight_pending, 0.0});
+        init_values.insert({event_weight_cur, 0.0});
     }
 
     /* ----------------- helpers ----------------- */
     static __host__ __device__ __forceinline__ double sigma(double v, VarAccessor<MechTrait>& vars) {
         return 1.0 / (1.0 + vars(NMDA_C) * exp(-vars(NMDA_rho) * v));
+    }
+
+    static __host__ __device__ __forceinline__ double sigma_prime(double sigma_value,
+                                                                  VarAccessor<MechTrait>& vars) {
+        return vars(NMDA_rho) * sigma_value * (1.0 - sigma_value);
     }
 
     /* ----------------- INIT -------------------- */
@@ -122,6 +187,18 @@ public:
 
         /* choose which Use to adopt (still simplified) */
         vars(Use) = (vars(w) > 0.0 ? vars(Use_e) : vars(Use_i));
+        vars(i) = 0.0;
+        vars(AMPA_g) = 0.0;
+        vars(NMDA_g) = 0.0;
+        vars(GABA_g) = 0.0;
+        vars(v_prev) = param.volt;
+        vars(didv) = 0.0;
+        vars(pure_i) = 0.0;
+        vars(g_mul) = 0.0;
+        vars(dgdv) = 0.0;
+        vars(dgdg) = 0.0;
+        vars(event_weight_pending) = 0.0;
+        vars(event_weight_cur) = 0.0;
     }
 
     /* ----------------- CURRENT ----------------- */
@@ -135,15 +212,80 @@ public:
             vars(AMPA_g) = vars(AMPA_B) - vars(AMPA_A);
             vars(NMDA_g) = vars(NMDA_B) - vars(NMDA_A);
             double s = SynRecord_Templated::sigma(v, vars);
+            if (param.updateIon) {
+                vars(pure_i) = vars(AMPA_g) * (v - vars(AMPA_e)) +
+                               vars(NMDA_g) * s * (v - vars(NMDA_e));
+                vars(event_weight_cur) = vars(event_weight_pending);
+                vars(event_weight_pending) = 0.0;
+            }
             current = fabs(vars(w)) *
                       (vars(AMPA_g) * (v - vars(AMPA_e)) +
                        vars(NMDA_g) * s * (v - vars(NMDA_e)));
         } else {                            // inhibitory (GABA)
             vars(GABA_g) = vars(GABA_B) - vars(GABA_A);
+            if (param.updateIon) {
+                vars(pure_i) = -vars(GABA_g) * (v - vars(GABA_e));
+                vars(event_weight_cur) = vars(event_weight_pending);
+                vars(event_weight_pending) = 0.0;
+            }
             current = fabs(vars(w)) * vars(GABA_g) * (v - vars(GABA_e));
         }
         vars(i) = current;
         return current;
+    }
+
+    DUAL_EXEC void current_vjp_single_node(MechTempCurVJPParam& param,
+                                           VarAccessor<MechTrait> vars) {
+        vars.idx = param.idx;
+        constexpr int k_w_learnable_slot = w_learnable_slot();
+        static_assert(k_w_learnable_slot >= 0, "syn_record.w must be registered as learnable");
+
+        const double grad_i = param.grad_mech_current;
+        const double v_t = tape_ref<v_prev>(param, vars);
+        const double abs_w = fabs(vars(w));
+
+        double& adj_ampa_a = adjoint_ref<AMPA_A>(param, vars);
+        double& adj_ampa_b = adjoint_ref<AMPA_B>(param, vars);
+        double& adj_nmda_a = adjoint_ref<NMDA_A>(param, vars);
+        double& adj_nmda_b = adjoint_ref<NMDA_B>(param, vars);
+        double& adj_gaba_a = adjoint_ref<GABA_A>(param, vars);
+        double& adj_gaba_b = adjoint_ref<GABA_B>(param, vars);
+
+        adj_ampa_a *= exp(-param.dt / vars(AMPA_tau1));
+        adj_ampa_b *= exp(-param.dt / vars(AMPA_tau2));
+        adj_nmda_a *= exp(-param.dt / vars(NMDA_tau1));
+        adj_nmda_b *= exp(-param.dt / vars(NMDA_tau2));
+        adj_gaba_a *= exp(-param.dt / vars(GABA_tau1));
+        adj_gaba_b *= exp(-param.dt / vars(GABA_tau2));
+
+        if (vars(w) > 0.0) {
+            const double ampa_g_t = tape_ref<AMPA_g>(param, vars);
+            const double nmda_g_t = tape_ref<NMDA_g>(param, vars);
+            const double ampa_drive = v_t - vars(AMPA_e);
+            const double nmda_drive = v_t - vars(NMDA_e);
+            const double s = SynRecord_Templated::sigma(v_t, vars);
+            const double ds = SynRecord_Templated::sigma_prime(s, vars);
+            const double nmda_drive_eff = s * nmda_drive;
+            const double pure = ampa_g_t * ampa_drive + nmda_g_t * nmda_drive_eff;
+
+            adj_ampa_a += grad_i * abs_w * -ampa_drive;
+            adj_ampa_b += grad_i * abs_w * ampa_drive;
+            adj_nmda_a += grad_i * abs_w * -nmda_drive_eff;
+            adj_nmda_b += grad_i * abs_w * nmda_drive_eff;
+            mechAtomAdd(
+                &param.grad_v[param.node_index],
+                grad_i * abs_w * (ampa_g_t + nmda_g_t * (s + nmda_drive * ds)));
+            mechAtomAdd(&grad_ref<w>(param, vars), grad_i * pure);
+        } else {
+            const double gaba_g_t = tape_ref<GABA_g>(param, vars);
+            const double gaba_drive = v_t - vars(GABA_e);
+            const double pure = -gaba_g_t * gaba_drive;
+
+            adj_gaba_a += grad_i * abs_w * -gaba_drive;
+            adj_gaba_b += grad_i * abs_w * gaba_drive;
+            mechAtomAdd(&param.grad_v[param.node_index], grad_i * abs_w * gaba_g_t);
+            mechAtomAdd(&grad_ref<w>(param, vars), grad_i * pure);
+        }
     }
 
     /* ----------------- STATE ------------------- */
@@ -157,15 +299,16 @@ public:
         decay(NMDA_A, NMDA_tau1);  decay(NMDA_B, NMDA_tau2);
         decay(GABA_A, GABA_tau1);  decay(GABA_B, GABA_tau2);
 
-        /* 下列记录量仅用于梯度 / 诊断，可删减 */
+        /* 下列记录量仅用于梯度 / 诊断，可删减.
+         * `pure_i` is intentionally left as the current-phase value written
+         * during current_single_node(updateIon=true). Public monitor traces
+         * should not be silently shifted to a state-phase
+         * tape value here. */
         double v = param.volt;
         if (vars(w) > 0.0) {
             vars(didv)   = fabs(vars(w)) *
                            (vars(AMPA_g) +
                             vars(NMDA_g) * SynRecord_Templated::sigma(vars(v_prev), vars));
-            vars(pure_i) = vars(AMPA_g) * (v - vars(AMPA_e)) +
-                           vars(NMDA_g) * SynRecord_Templated::sigma(vars(v_prev), vars) *
-                           (v - vars(NMDA_e));
             vars(g_mul)  = fabs(vars(w)) *
                            vars(NMDA_g) * (v - vars(NMDA_e));
             vars(dgdv)   = (SynRecord_Templated::sigma(vars(v_prev) + vars(dv), vars) -
@@ -173,7 +316,6 @@ public:
             vars(dgdg)   = 0.0;
         } else {
             vars(didv) = fabs(vars(w)) * vars(GABA_g);
-            vars(pure_i) = -vars(GABA_g) * (v - vars(GABA_e));
             vars(g_mul) = vars(dgdv) = vars(dgdg) = 0.0;
         }
     }
@@ -183,6 +325,7 @@ public:
                                            VarAccessor<MechTrait>& vars) {
         /* —— simplified: ignore short-term plasticity —— */
         double w_event = recv.weight;           // NetCon weight (uS)
+        vars(event_weight_pending) += w_event;
         if (vars(w) > 0.0) {                    // excitatory
             double ra = vars(r_na);
             double a_fac = w_event * vars(AMPA_factor) / (1.0 + ra);
@@ -197,9 +340,167 @@ public:
             vars(GABA_B) += g_fac;
         }
     }
+
+    bool supports_spike_vjp() const override { return true; }
+
+    void spike_vjp_cpu(SimPostSynSpikeVJPParam& param) override {
+        constexpr int event_slot = event_weight_tape_slot();
+        static_assert(event_slot >= 0, "syn_record.event_weight_cur must be in CurrentVjpTapeVars");
+        this->ensure_default_vjp_adjoint_storage_();
+        if (static_cast<int>(this->current_vjp_tape_stores_.size()) <= event_slot) {
+            throw std::runtime_error("syn_record spike_vjp_cpu: current VJP tape stores are not initialized");
+        }
+        const double* event_tape =
+            this->current_vjp_tape_stores_[static_cast<std::size_t>(event_slot)].tape_cpu_data_for_backward();
+        if (event_tape == nullptr) {
+            throw std::runtime_error("syn_record spike_vjp_cpu: empty event-weight tape");
+        }
+        const std::size_t base =
+            static_cast<std::size_t>(param.step_index) * static_cast<std::size_t>(this->nnode);
+
+        double* adj_ampa_a = this->vjp_adjoint_data_[static_cast<std::size_t>(adj_ampa_a_slot())].get_cpu_data();
+        double* adj_ampa_b = this->vjp_adjoint_data_[static_cast<std::size_t>(adj_ampa_b_slot())].get_cpu_data();
+        double* adj_nmda_a = this->vjp_adjoint_data_[static_cast<std::size_t>(adj_nmda_a_slot())].get_cpu_data();
+        double* adj_nmda_b = this->vjp_adjoint_data_[static_cast<std::size_t>(adj_nmda_b_slot())].get_cpu_data();
+        double* adj_gaba_a = this->vjp_adjoint_data_[static_cast<std::size_t>(adj_gaba_a_slot())].get_cpu_data();
+        double* adj_gaba_b = this->vjp_adjoint_data_[static_cast<std::size_t>(adj_gaba_b_slot())].get_cpu_data();
+        double* syn_w = this->var_struct[w]->get_cpu_data();
+        double* r_na_data = this->var_struct[r_na]->get_cpu_data();
+        double* ampa_factor_data = this->var_struct[AMPA_factor]->get_cpu_data();
+        double* nmda_factor_data = this->var_struct[NMDA_factor]->get_cpu_data();
+        double* gaba_factor_data = this->var_struct[GABA_factor]->get_cpu_data();
+        uint32_t* spk_vec_idx = this->vecdata_spk_vec_idx->get_cpu_data();
+        int* delay_steps = this->vecdata_delay_steps->get_cpu_data();
+
+        for (int i = 0; i < this->nnode; ++i) {
+            const double event_weight = event_tape[base + static_cast<std::size_t>(i)];
+            if (event_weight == 0.0) {
+                continue;
+            }
+            double local_adj = 0.0;
+            if (syn_w[i] > 0.0) {
+                const double ra = r_na_data[i];
+                local_adj =
+                    (adj_ampa_a[i] + adj_ampa_b[i]) * ampa_factor_data[i] / (1.0 + ra) +
+                    (adj_nmda_a[i] + adj_nmda_b[i]) * nmda_factor_data[i] * ra / (1.0 + ra);
+            } else {
+                local_adj = (adj_gaba_a[i] + adj_gaba_b[i]) * gaba_factor_data[i];
+            }
+            if (local_adj == 0.0) {
+                continue;
+            }
+            const uint32_t src_idx = spk_vec_idx[i];
+            const int delay_step = delay_steps != nullptr ? delay_steps[i] : 0;
+            const int emit_step = param.step_index - (delay_step > 0 ? delay_step : 0);
+            if (src_idx < static_cast<uint32_t>(param.pre_spike_adj_count) &&
+                emit_step >= 0 && emit_step < param.step_count) {
+                const std::size_t dst =
+                    static_cast<std::size_t>(emit_step) *
+                        static_cast<std::size_t>(param.pre_spike_adj_count) +
+                    static_cast<std::size_t>(src_idx);
+                param.pending_pre_spike_adj[dst] += event_weight * local_adj;
+            }
+        }
+    }
+
+    void spike_vjp_gpu(SimPostSynSpikeVJPParam& param) override {
+        if (this->nnode <= 0) {
+            return;
+        }
+        constexpr int event_slot = event_weight_tape_slot();
+        static_assert(event_slot >= 0, "syn_record.event_weight_cur must be in CurrentVjpTapeVars");
+        this->ensure_default_vjp_adjoint_storage_();
+        if (static_cast<int>(this->current_vjp_tape_stores_.size()) <= event_slot) {
+            throw std::runtime_error("syn_record spike_vjp_gpu: current VJP tape stores are not initialized");
+        }
+        const auto replay =
+            this->current_vjp_tape_stores_[static_cast<std::size_t>(event_slot)]
+                .acquire_gpu_replay_view(param.step_index);
+        const int block_num = (this->nnode + nthread_per_block - 1) / nthread_per_block;
+        cudaStream_t stream = *reinterpret_cast<cudaStream_t*>(this->cuda_stream);
+        syn_record_spike_vjp_kernel<<<block_num, nthread_per_block, 0, stream>>>(
+            this->nnode,
+            this->vjp_adjoint_data_[static_cast<std::size_t>(adj_ampa_a_slot())].get_gpu_data(),
+            this->vjp_adjoint_data_[static_cast<std::size_t>(adj_ampa_b_slot())].get_gpu_data(),
+            this->vjp_adjoint_data_[static_cast<std::size_t>(adj_nmda_a_slot())].get_gpu_data(),
+            this->vjp_adjoint_data_[static_cast<std::size_t>(adj_nmda_b_slot())].get_gpu_data(),
+            this->vjp_adjoint_data_[static_cast<std::size_t>(adj_gaba_a_slot())].get_gpu_data(),
+            this->vjp_adjoint_data_[static_cast<std::size_t>(adj_gaba_b_slot())].get_gpu_data(),
+            replay.tape_gpu,
+            replay.local_step_index,
+            this->nnode,
+            this->var_struct[w]->get_gpu_data(),
+            this->var_struct[r_na]->get_gpu_data(),
+            this->var_struct[AMPA_factor]->get_gpu_data(),
+            this->var_struct[NMDA_factor]->get_gpu_data(),
+            this->var_struct[GABA_factor]->get_gpu_data(),
+            this->vecdata_spk_vec_idx->get_gpu_data(),
+            this->vecdata_delay_steps->get_gpu_data(),
+            param.pending_pre_spike_adj,
+            param.pre_spike_adj_count,
+            param.step_count,
+            param.step_index);
+    }
 };
 
-/* ----------- register with HelioX ----------- */
+__global__ inline void syn_record_spike_vjp_kernel(
+    int nnode,
+    const double* adj_ampa_a,
+    const double* adj_ampa_b,
+    const double* adj_nmda_a,
+    const double* adj_nmda_b,
+    const double* adj_gaba_a,
+    const double* adj_gaba_b,
+    const double* event_weight_tape,
+    int event_tape_step,
+    int event_tape_stride,
+    const double* syn_w,
+    const double* r_na,
+    const double* ampa_factor,
+    const double* nmda_factor,
+    const double* gaba_factor,
+    const uint32_t* spk_vec_idx,
+    const int* delay_steps,
+    double* pending_pre_spike_adj,
+    int pre_spike_adj_count,
+    int step_count,
+    int arrival_step) {
+    const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= static_cast<unsigned int>(nnode)) {
+        return;
+    }
+    const double event_weight =
+        event_weight_tape[static_cast<std::size_t>(event_tape_step) *
+                              static_cast<std::size_t>(event_tape_stride) +
+                          static_cast<std::size_t>(i)];
+    if (event_weight == 0.0) {
+        return;
+    }
+    double local_adj = 0.0;
+    if (syn_w[i] > 0.0) {
+        const double ra = r_na[i];
+        local_adj =
+            (adj_ampa_a[i] + adj_ampa_b[i]) * ampa_factor[i] / (1.0 + ra) +
+            (adj_nmda_a[i] + adj_nmda_b[i]) * nmda_factor[i] * ra / (1.0 + ra);
+    } else {
+        local_adj = (adj_gaba_a[i] + adj_gaba_b[i]) * gaba_factor[i];
+    }
+    if (local_adj == 0.0) {
+        return;
+    }
+    const uint32_t src_idx = spk_vec_idx[i];
+    const int delay_step = delay_steps != nullptr ? delay_steps[i] : 0;
+    const int emit_step = arrival_step - (delay_step > 0 ? delay_step : 0);
+    if (src_idx < static_cast<uint32_t>(pre_spike_adj_count) &&
+        emit_step >= 0 && emit_step < step_count) {
+        const std::size_t dst =
+            static_cast<std::size_t>(emit_step) * static_cast<std::size_t>(pre_spike_adj_count) +
+            static_cast<std::size_t>(src_idx);
+        atomicAdd(&pending_pre_spike_adj[dst], event_weight * local_adj);
+    }
+}
+
+/* ----------- register with DeepDendrite ----------- */
 REGISTER_POSTSYN("syn_record", SynRecord_Templated,5);
 
 } // namespace SynRecord

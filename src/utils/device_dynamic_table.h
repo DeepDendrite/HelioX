@@ -138,6 +138,12 @@ public:
         return const_cast<DynamicDeviceTable *>(this)->get_by_handle(h);
     }
 
+    int index_of_handle(Handle h) const {
+        auto it = handle2index_.find(h);
+        if (it == handle2index_.end()) throw std::runtime_error("Handle not found");
+        return it->second;
+    }
+
     CpuOnlyItem &get_cpu_only_by_handle(Handle h) {
         if constexpr (std::is_same_v<CpuOnlyItem, std::monostate>) {
             throw std::runtime_error("CpuOnlyItem is monostate — no data available");

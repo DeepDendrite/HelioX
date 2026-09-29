@@ -6,11 +6,17 @@ using namespace std;
 
 ArtiCell::ArtiCell(MechInitParams &param) : PostSyn(param)
 {
+    vecdata_spk_vec_offset = nullptr;
+    spk_vec_bkp = nullptr;
+    spk_flags_bkp = nullptr;
 }
 
 ArtiCell::~ArtiCell()
 {
-
+    if (vecdata_spk_vec_offset) {
+        delete vecdata_spk_vec_offset;
+        vecdata_spk_vec_offset = nullptr;
+    }
 }
 
 void ArtiCell::net_send_cpu(uint32_t idx, double t, SpikeFlag flag)

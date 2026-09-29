@@ -3,6 +3,7 @@
 #include <string>
 #include "utils.h"  // VarDescriptor现在定义在utils.h中
 #include "magic_enum/magic_enum.hpp"
+#include "staging_channel.h"
 #include "vecdata.h"
 #include "device_dynamic_table.h"
 
@@ -31,19 +32,9 @@ struct OutPutBuffers{
     std::vector<double> ipc_buffer; // 使用 std::vector 来管理缓冲区
 };
 
-
-struct BufferItem{
-    double *var_ptr_cpu; // CPU 端变量指针
-    double *var_ptr_gpu; // GPU 端变量指针
-    VecData<double> buffer; // 使用 VecData 来管理缓冲区
-    int buffer_capacity; // 每个 buffer 的最大容量
-    int len; // 当前缓冲区中已写入的数据条数
-    BufferItem(Mode mode,int buffer_cap, double *var_ptr_cpu, double *var_ptr_gpu)
-        : var_ptr_cpu(var_ptr_cpu), var_ptr_gpu(var_ptr_gpu), len(0),buffer(mode, buffer_cap), buffer_capacity(buffer_cap) {
-        // printf("Item capacity = %zu\n", buffer_capacity);
-    }
-    void log_data_single();
-    void flush();
+enum class RecorderStorageDType {
+    FP64 = 0,
+    FP32 = 1,
 };
 
 enum class BufferEnable{
@@ -62,9 +53,10 @@ struct magic_enum::customize::enum_range<BufferEnable> {
 struct VariableRecorder {
     Mode mode;
 
-    DynamicDeviceTable<BufferItem,VarDescriptor,OutPutBuffers> bufferTable;
+    DynamicDeviceTable<StagingChannel,VarDescriptor,OutPutBuffers> bufferTable;
 
     BufferEnable buffer_enable;
+    RecorderStorageDType storage_dtype;
 
     int buffer_capacity;   // 每个 buffer 的容量
     int buffer_size;       // 记录当前缓冲区中已写入的数据条数
@@ -81,20 +73,23 @@ struct VariableRecorder {
     bool isEnable(BufferEnable flag) {
         return (int)buffer_enable & (int)flag;
     }
-    VariableRecorder(Mode mode,size_t _buffer_capacity,BufferEnable _buffer_enable):mode(mode),bufferTable(mode) {
+    VariableRecorder(Mode mode, size_t _buffer_capacity, BufferEnable _buffer_enable, bool use_fp32_storage = false)
+        : mode(mode), bufferTable(mode), storage_dtype(use_fp32_storage ? RecorderStorageDType::FP32 : RecorderStorageDType::FP64) {
         buffer_capacity = _buffer_capacity;
-        printf("Buffer Capacity = %zu\n", buffer_capacity);
         buffer_size = 0;
         this->buffer_enable = _buffer_enable;
-        printf("IPC Enable = %d\n", isEnable(BufferEnable::IPC));
-        printf("HDF5 Enable = %d\n", isEnable(BufferEnable::HDF5));
     }
     // 全部 push 完成后，需要调用 initialize
     // 返回DDT分配的handle，作为新的recordId
     int push_back(const VarDescriptor& record_var, RecordPoint &recordPoint) {
         auto handle = bufferTable.add_or_update(
             record_var,
-            BufferItem(mode, buffer_capacity, recordPoint.var_ptr_cpu, recordPoint.var_ptr_gpu),
+            StagingChannel(mode,
+                           buffer_capacity,
+                           1,
+                           recordPoint.var_ptr_cpu,
+                           recordPoint.var_ptr_gpu,
+                           storage_dtype == RecorderStorageDType::FP32),
             OutPutBuffers{recordPoint.dataset, std::vector<double>()}
         );
         return handle;
@@ -111,11 +106,11 @@ struct VariableRecorder {
         // 重置缓冲区状态
         buffer_size = 0;  // 重置全局buffer_size
 
-        // 重置每个BufferItem的状态
+        // 重置每个 staged channel 的状态
         auto bufferItems = bufferTable.get_cpu_data();
         auto buffer_num = bufferTable.size();
         for (int i = 0; i < buffer_num; i++) {
-            bufferItems[i].len = 0;  // 重置每个item的长度
+            bufferItems[i].flush();
         }
 
         // 重要：将 len 重置同步到 GPU，避免 GPU 端仍使用旧 len 导致越界/NaN
@@ -131,7 +126,7 @@ struct VariableRecorder {
         auto buffer_num = bufferTable.size();
         auto bufferItems = bufferTable.get_cpu_data();
         for (int i = 0; i < buffer_num; i++) {
-            bufferItems[i].log_data_single();
+            bufferItems[i].stage_sample_single();
         }
         buffer_size++;
         if (buffer_size >= buffer_capacity) {
@@ -145,12 +140,22 @@ struct VariableRecorder {
         auto output_buffers = bufferTable.get_cpu_only_data_vec();
         auto record_buffers = bufferTable.get_cpu_data();
         auto buffer_count = bufferTable.size();
+        std::vector<double> temp_f64;
         for (int i = 0; i < buffer_count; i++) {
             auto & dataset = (*output_buffers)[i].dataset;
             auto current_size = dataset.getSpace().getDimensions()[0];
             // 扩展数据集大小，写入当前 buffer 中收集的数据
             dataset.resize({ current_size + buffer_size });
-            dataset.select({ current_size }, { (unsigned long)buffer_size }).write(record_buffers[i].buffer.get_cpu_data());
+            if (record_buffers[i].use_fp32_storage) {
+                temp_f64.resize(buffer_size);
+                auto* src = record_buffers[i].buffer_f32.get_cpu_data();
+                for (int j = 0; j < buffer_size; ++j) {
+                    temp_f64[j] = static_cast<double>(src[j]);
+                }
+                dataset.select({ current_size }, { (unsigned long)buffer_size }).write(temp_f64.data());
+            } else {
+                dataset.select({ current_size }, { (unsigned long)buffer_size }).write(record_buffers[i].buffer_f64.get_cpu_data());
+            }
         }
     }
 
@@ -164,8 +169,16 @@ struct VariableRecorder {
             auto &ipc_buffer = (*output_buffers)[i].ipc_buffer;
             auto current_size = ipc_buffer.size();
             ipc_buffer.resize(current_size + buffer_size);
-            auto buffer_ptr = record_buffers[i].buffer.get_cpu_data();
-            std::copy(buffer_ptr, buffer_ptr + buffer_size, ipc_buffer.data() + current_size);
+            auto* dst = ipc_buffer.data() + current_size;
+            if (record_buffers[i].use_fp32_storage) {
+                auto* src = record_buffers[i].buffer_f32.get_cpu_data();
+                for (int j = 0; j < buffer_size; ++j) {
+                    dst[j] = static_cast<double>(src[j]);
+                }
+            } else {
+                auto* src = record_buffers[i].buffer_f64.get_cpu_data();
+                std::copy(src, src + buffer_size, dst);
+            }
         }
     }
 
@@ -176,7 +189,7 @@ struct VariableRecorder {
         auto buffer_num = bufferTable.size();
         auto bufferItems = bufferTable.get_cpu_data();
         for (int i = 0; i < buffer_num; i++) {
-            assert(bufferItems[i].len == buffer_size && "BufferItem length should match buffer_size");
+            assert(bufferItems[i].staged_count() == buffer_size && "staged channel length should match buffer_size");
             bufferItems[i].flush();
         }
         // printf("Flushed %zu items to HDF5 and IPC buffers.\n", buffer_size);

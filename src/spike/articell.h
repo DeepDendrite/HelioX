@@ -14,8 +14,8 @@ class ArtiCell : public PostSyn
         virtual ~ArtiCell();
 
         VecData<uint32_t>* vecdata_spk_vec_offset;
-        SpikeVector* spk_vec_bkp; // spike vector pointer which points to spike vector object in HelioXroupData
-        VecData<SpikeFlag> *spk_flags_bkp; // spike flag pointer pointing to vecdata_spk_flags in HelioXroupData
+        SpikeVector* spk_vec_bkp; // spike vector pointer which points to spike vector object in NeuronGroupData
+        VecData<SpikeFlag> *spk_flags_bkp; // spike flag pointer pointing to vecdata_spk_flags in NeuronGroupData
         // customized function for reading data
         virtual void bbcore_read(int icnt, int dcnt, int* iArray, double* dArray, Mode mode) = 0; 
 

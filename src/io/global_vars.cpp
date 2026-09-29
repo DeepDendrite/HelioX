@@ -78,8 +78,6 @@ void read_global_dat(const char *datapath)
     }
 
     fclose(f);
-    printf("Read global.dat file: %s\n", file_name.c_str());
-    printf("global var map size: %zu\n", coreneuron::global_var_map.size());
     //这部分先不用实现
     // overwrite global.dat config if seed is specified on Command line
     // if (cli_global_seed) {

@@ -6,7 +6,7 @@
 // This is only a container for configuration so that later phases can
 // move replay logic out of python_api without changing signatures.
 
-namespace heliox::runtime_api::learn {
+namespace neurong::runtime_api::learn {
 
 struct ReplayConfig {
     double tstop_ms = 0.0;
@@ -22,5 +22,5 @@ struct ReplayConfig {
     int32_t clip_check_every = 1;
 };
 
-}  // namespace heliox::runtime_api::learn
+}  // namespace neurong::runtime_api::learn
 

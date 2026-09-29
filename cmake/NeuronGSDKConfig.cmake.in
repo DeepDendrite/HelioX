@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(CUDAToolkit REQUIRED)
+find_dependency(HDF5 REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/NeuronGSDKTargets.cmake")
+
+set(NeuronGSDK_PREFIX "${PACKAGE_PREFIX_DIR}")
+set(NeuronGSDK_INCLUDE_DIR "${NeuronGSDK_PREFIX}/@CMAKE_INSTALL_INCLUDEDIR@")
+set(NeuronGSDK_PYTHON_DIR "${NeuronGSDK_PREFIX}/python")
+set(NeuronGSDK_PYTHON_EXTENSION_DIR "${NeuronGSDK_PREFIX}/@CMAKE_INSTALL_LIBDIR@/python")
+set(NeuronGSDK_MECH_TEMPLATE_DIR "${NeuronGSDK_PREFIX}/@CMAKE_INSTALL_DATADIR@/neurong/mech")

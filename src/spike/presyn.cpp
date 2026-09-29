@@ -5,8 +5,9 @@
 
 using namespace std;
 
-PreSyn::PreSyn(uint32_t n, SpikeVector* vec)
+PreSyn::PreSyn(Mode mode, uint32_t n, SpikeVector* vec)
 {
+    (void) mode;
     // vecdata_spk_vec_cnt = nullptr;
     // vecdata_post_syn_type = nullptr;
     // vecdata_post_synid = nullptr;
@@ -18,35 +19,13 @@ PreSyn::PreSyn(uint32_t n, SpikeVector* vec)
     vecdata_pre_flags = nullptr;
     vecdata_spk_vec_offset = nullptr;//从coredat的spk_vec_offset拷贝过来的
     vecdata_gids = nullptr;
-    // Pinned host counters for async D2H copy (do NOT use mapped memory here; atomicAdd into mapped host is slow).
-    cpu_mem_allocate((void**)&cudaMappedMem, 2 * sizeof(int));
-    spk_num_real = cudaMappedMem;
-    spk_num_tot = cudaMappedMem + 1;
-    *spk_num_real = 0;
-    *spk_num_tot = 0;
-
-    // Device-side counters.
-    gpu_mem_allocate((void**)&d_spk_num_real, sizeof(int));
-    gpu_mem_allocate((void**)&d_spk_num_tot, sizeof(int));
-
-    // Non-blocking stream + event for spike detection; this avoids implicit sync with other streams.
-    cudaStream_t* s = new cudaStream_t;
-    cudaError_t err = cudaStreamCreateWithFlags(s, cudaStreamNonBlocking);
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Failed to create spike_stream: %s\n", cudaGetErrorString(err));
-        delete s;
-        s = nullptr;
-    }
-    spike_stream = reinterpret_cast<void*>(s);
-
-    cudaEvent_t* ev = new cudaEvent_t;
-    err = cudaEventCreateWithFlags(ev, cudaEventDisableTiming);
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Failed to create spike_event: %s\n", cudaGetErrorString(err));
-        delete ev;
-        ev = nullptr;
-    }
-    spike_event = reinterpret_cast<void*>(ev);
+    cudaMappedMem = nullptr;
+    spk_num_real = nullptr;
+    spk_num_tot = nullptr;
+    d_spk_num_real = nullptr;
+    d_spk_num_tot = nullptr;
+    spike_stream = nullptr;
+    spike_event = nullptr;
 }
 
 
@@ -54,8 +33,39 @@ PreSyn::PreSyn(Mode mode, uint32_t n, SpikeVector* vec,
                const vector<int> &pre_node_indices, 
                const vector<double> &threshold, 
                const vector<uint32_t> &spk_vec_offset,
-               const vector<int> &pre_gids):PreSyn(n,vec)
+               const vector<int> &pre_gids):PreSyn(mode, n, vec)
 {
+    if (mode == GPU) {
+        // Pinned host counters for async D2H copy (do NOT use mapped memory here; atomicAdd into mapped host is slow).
+        cpu_mem_allocate((void**)&cudaMappedMem, 2 * sizeof(int));
+        spk_num_real = cudaMappedMem;
+        spk_num_tot = cudaMappedMem + 1;
+        *spk_num_real = 0;
+        *spk_num_tot = 0;
+
+        // Device-side counters.
+        gpu_mem_allocate((void**)&d_spk_num_real, sizeof(int));
+        gpu_mem_allocate((void**)&d_spk_num_tot, sizeof(int));
+
+        // Non-blocking stream + event for spike detection; this avoids implicit sync with other streams.
+        cudaStream_t* s = new cudaStream_t;
+        cudaError_t err = cudaStreamCreateWithFlags(s, cudaStreamNonBlocking);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Failed to create spike_stream: %s\n", cudaGetErrorString(err));
+            delete s;
+            s = nullptr;
+        }
+        spike_stream = reinterpret_cast<void*>(s);
+
+        cudaEvent_t* ev = new cudaEvent_t;
+        err = cudaEventCreateWithFlags(ev, cudaEventDisableTiming);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Failed to create spike_event: %s\n", cudaGetErrorString(err));
+            delete ev;
+            ev = nullptr;
+        }
+        spike_event = reinterpret_cast<void*>(ev);
+    }
 
 
     vecdata_pre_node_indices = new VecData<int>(mode, pre_node_indices);
@@ -161,18 +171,6 @@ void PreSyn::threshold_detect_cpu(double* vec_v, SpikeFlag* spk_flags, double t,
         }
     }
 
-    if (spike_profile_enabled_) {
-        spike_profile_stats_.steps += 1;
-        if (spk_count > 0) {
-            spike_profile_stats_.steps_with_presyn_spike += 1;
-            spike_profile_stats_.presyn_spike_total += static_cast<uint64_t>(spk_count);
-            if (spk_count > spike_profile_stats_.presyn_spike_max) {
-                spike_profile_stats_.presyn_spike_max = spk_count;
-            }
-        }
-        const int bucket = spk_count >= 63 ? 63 : (spk_count < 0 ? 0 : spk_count);
-        spike_profile_stats_.presyn_spike_hist[static_cast<size_t>(bucket)] += 1;
-    }
 
 }
 
@@ -216,18 +214,6 @@ int PreSyn::threshold_detect_gpu(double* vec_v, VecData<SpikeFlag>* vecdata_spk_
     }
 
     const int spk_count = *(this->spk_num_real);
-    if (spike_profile_enabled_) {
-        spike_profile_stats_.steps += 1;
-        if (spk_count > 0) {
-            spike_profile_stats_.steps_with_presyn_spike += 1;
-            spike_profile_stats_.presyn_spike_total += static_cast<uint64_t>(spk_count);
-            if (spk_count > spike_profile_stats_.presyn_spike_max) {
-                spike_profile_stats_.presyn_spike_max = spk_count;
-            }
-        }
-        const int bucket = spk_count >= 63 ? 63 : (spk_count < 0 ? 0 : spk_count);
-        spike_profile_stats_.presyn_spike_hist[static_cast<size_t>(bucket)] += 1;
-    }
     if (spk_count == 0) {
         return *(this->spk_num_tot);
     }

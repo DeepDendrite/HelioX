@@ -220,18 +220,16 @@ struct VarStruct
                 init_value = init_values[var];
             }
 
-            // 新改动：不支持标量了，统统复制成node_count数量
-            int actual_len = param.node_count;
-            if (param.array_dims != nullptr && var_in_coredata_idx.contains(var))
-            { // 新版的数据结构，记录了array的大小
-                int len = var_in_coredata_idx.at(var).array_size;
-                actual_len *= len;
-                var_len[static_cast<int>(var)] = len;
-            }
-            else
+            // 每个实例至少有1个元素；若机制声明了数组变量，则按声明的array_size分配。
+            // 不能依赖param.array_dims：in-memory前端通常不会提供它，但数组stride仍必须正确。
+            int array_len = 1;
+            if (auto it = var_in_coredata_idx.find(var); it != var_in_coredata_idx.end())
             {
-                var_len[static_cast<int>(var)] = 1;
+                array_len = std::max(1, it->second.array_size);
             }
+
+            int actual_len = param.node_count * array_len;
+            var_len[static_cast<int>(var)] = array_len;
             vecdata_vars[static_cast<int>(var)] = make_unique<VecData<double>>(param.mode, init_value, actual_len);
         }
         initDevVar<VarNames>(CPU, vecdata_vars, &cpu_dev_var, var_len);

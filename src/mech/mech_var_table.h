@@ -7,13 +7,14 @@
 using namespace std;
 
 struct MechVarData{
-    double *cpu_data;
-    double *gpu_data;
-    int len;
+    double *cpu_data = nullptr;
+    double *gpu_data = nullptr;
+    VecData<double>* vecdata = nullptr;
+    int len = 0;
     string name;
 };
 
 using MechVarMap = unordered_map<int, MechVarData>;//cordDatIdx -> MechVarData
 using MechVarTable = unordered_map<int, MechVarMap>;
 
-inline MechVarTable mech_var_table;
+extern MechVarTable mech_var_table;

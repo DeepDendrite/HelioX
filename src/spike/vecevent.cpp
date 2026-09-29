@@ -2,11 +2,32 @@
 #include "vecevent.h"
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 
 using namespace std;
 
+REGISTER_MECHANISM("VecStim", VecEvent);
+static bool VecEvent_play_registered = []() {
+    FunctionRegistry::getInstance().register_func("VecStim", "play", std::function<void(Mode, int, vector<double>)>(&VecEvent::play));
+    return true;
+}();
+static bool VecEvent_static_interface_registered = []() {
+    StaticInterfaceRegistry::getInstance().register_property<std::string, std::string>(
+        "VecStim",
+        "mode",
+        std::function<std::string()>([]() { return VecEvent::getPlayUpdateModeName(); }),
+        std::function<void(std::string)>([](std::string mode) { VecEvent::setPlayUpdateModeByName(mode); })
+    );
+    return true;
+}();
+
 // 静态实例指针定义
 VecEvent* VecEvent::instance = nullptr;
+// 当前实现默认只有一个 sim 实例在使用 VecStim，因此这里仍保留全局静态状态。
+// 如果以后要支持多个 sim 实例并存，这里的 current_time_/play_update_mode_
+// 都需要改造成 per-sim 状态，否则不同实例之间会互相污染。
+double VecEvent::current_time_ = 0.0;
+VecEvent::PlayUpdateMode VecEvent::play_update_mode_ = VecEvent::PlayUpdateMode::Enhanced;
 
 VecEvent::VecEvent(MechInitParams &param) : ArtiCell(param)
 {
@@ -61,6 +82,36 @@ void VecEvent::destroyInstance() {
     }
 }
 
+void VecEvent::setCurrentTime(double t) {
+    current_time_ = t;
+}
+
+void VecEvent::setPlayUpdateModeByName(const std::string& mode) {
+    if (mode == "legacy") {
+        play_update_mode_ = PlayUpdateMode::Legacy;
+        return;
+    }
+    if (mode == "enhanced") {
+        play_update_mode_ = PlayUpdateMode::Enhanced;
+        return;
+    }
+    throw std::runtime_error("VecStim.mode must be 'legacy' or 'enhanced', got: " + mode);
+}
+
+std::string VecEvent::getPlayUpdateModeName() {
+    switch (play_update_mode_) {
+        case PlayUpdateMode::Legacy:
+            return "legacy";
+        case PlayUpdateMode::Enhanced:
+            return "enhanced";
+    }
+    return "legacy";
+}
+
+VecEvent::PlayUpdateMode VecEvent::getPlayUpdateMode() {
+    return play_update_mode_;
+}
+
 void VecEvent::reg_node_indices(MechInitParams &param)
 {
     auto node_count = param.node_count;
@@ -70,6 +121,7 @@ void VecEvent::reg_node_indices(MechInitParams &param)
         printf_debug("VecEvent::reg_node_indices: nnode: %d\n", nnode);
         vecdata_weights = new VecData<double>(mode, 0.0, node_count);
         vecdata_delay = new VecData<double>(mode, 0.0, node_count);
+        vecdata_delay_steps = new VecData<int>(mode, 0, node_count);
         vecdata_spk_vec_idx = new VecData<uint32_t>(mode, (uint32_t)0, node_count);
         vecdata_spike_flag = new VecData<SpikeFlag>(mode, SpikeFlag::INVALID, node_count);
         vecdata_receive_idx_vec = new VecData<uint32_t>(mode, (uint32_t)0, node_count);
@@ -80,7 +132,7 @@ void VecEvent::reg_node_indices(MechInitParams &param)
 
     // Ensure VecStim has a stable slot per instance even when bbcore export
     // does not provide VecStim vector data (icnt=0). This is required for the
-    // "export-empty + inject spike times on HELIOX side" workflow.
+    // "export-empty + inject spike times on NEURONG side" workflow.
     if (vec_ptr.size() < static_cast<size_t>(node_count)) {
         vec_ptr.resize(static_cast<size_t>(node_count), nullptr);
     }
@@ -154,6 +206,54 @@ void VecEvent::element_cpu(int inode)
         }
 
     }
+}
+
+void VecEvent::clear_pending_events_for_instance(int mech_idx)
+{
+    SpikeBuffer filtered;
+    while (!spike_buffer.empty()) {
+        Spike spk = spike_buffer.top();
+        spike_buffer.pop();
+        if (spk.syn_id == mech_idx && spk.syn_type == this->type) {
+            continue;
+        }
+        filtered.push(spk);
+    }
+    spike_buffer = std::move(filtered);
+}
+
+void VecEvent::rearm_sequence(int mech_idx, double current_t)
+{
+    assert(mech_idx >= 0 && mech_idx < nnode);
+
+    int* index = this->vecdata_index->get_cpu_data();
+    double* etime = this->vecdata_etime->get_cpu_data();
+
+    clear_pending_events_for_instance(mech_idx);
+
+    VecData<double>* vv = this->vec_ptr[mech_idx];
+    if (vv == nullptr || vv->size() <= 0) {
+        index[mech_idx] = -1;
+        etime[mech_idx] = 0.0;
+        return;
+    }
+
+    const int len = vv->size();
+    double* px = vv->get_cpu_data();
+    int next_idx = 0;
+    while (next_idx < len && px[next_idx] < current_t) {
+        next_idx++;
+    }
+
+    if (next_idx >= len) {
+        index[mech_idx] = -1;
+        etime[mech_idx] = 0.0;
+        return;
+    }
+
+    etime[mech_idx] = px[next_idx];
+    index[mech_idx] = next_idx + 1;
+    net_send_cpu(mech_idx, etime[mech_idx], SpikeFlag::SELF_EVENT);
 }
 
 bool VecEvent::net_receive_cpu(double t)
@@ -283,9 +383,21 @@ void VecEvent::play(Mode mode, int mech_idx, vector<double> data_arr){
 
 void VecEvent::update_sequence(Mode mode, int mech_idx, const double* data_ptr, int len) {
     VecEvent* mech = VecEvent::getInstance();
-    assert(mech_idx >= 0 && mech_idx < mech->vec_ptr.size());
-    assert(mech != nullptr);
+    if (mech == nullptr) {
+        printf("VecEvent::update_sequence: instance not initialized\n");
+        return;
+    }
+    if (mech_idx < 0 || static_cast<size_t>(mech_idx) >= mech->vec_ptr.size()) {
+        printf("VecEvent::update_sequence: invalid mech_idx %d (size=%zu)\n",
+               mech_idx,
+               mech->vec_ptr.size());
+        return;
+    }
     if (len <= 0) {
+        return;
+    }
+    if (data_ptr == nullptr) {
+        printf("VecEvent::update_sequence: data_ptr is null for mech_idx %d\n", mech_idx);
         return;
     }
 
@@ -305,5 +417,8 @@ void VecEvent::update_sequence(Mode mode, int mech_idx, const double* data_ptr, 
     std::memcpy(cpu_buf, data_ptr, sizeof(double) * len);
     if (mode == Mode::GPU) {
         vecdata->update_gpu_data_from_cpu();
+    }
+    if (getPlayUpdateMode() == PlayUpdateMode::Enhanced) {
+        mech->rearm_sequence(mech_idx, current_time_);
     }
 }

@@ -8,11 +8,34 @@
 #include "netstim.h"
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <cstdint>
 
 extern vector<coreneuron::NetCon *> netcon_in_presyn_order;
-void setup_permute_info(HelioXroupData *ndat, coreneuron::CoreData *cdat, PermuteInfo &pi, Mode mode)
+
+namespace {
+
+double valid_delay_dt_ms(double dt_ms) {
+    if (!(dt_ms > 0.0) || !std::isfinite(dt_ms)) {
+        dt_ms = 0.025;
+    }
+    return dt_ms;
+}
+
+std::int32_t quantize_delay_step_for_dt(double delay_ms, double dt_ms) {
+    if (!std::isfinite(delay_ms) || delay_ms < 0.0) {
+        return 0;
+    }
+    // Fixed-step event delivery cannot observe a fractional-delay event before
+    // the next delivery tick, so use ceil rather than nearest-step rounding.
+    return static_cast<std::int32_t>(std::ceil(delay_ms / dt_ms - 1e-9));
+}
+
+}  // namespace
+
+void setup_permute_info(NeuronGroupData *ndat, coreneuron::CoreData *cdat, PermuteInfo &pi, Mode mode)
 {
-    printf("setup_permute_info: permute_type=%d mode = %s\n", permute_type, magic_enum::enum_name(mode).data());
     if (permute_type == 1)
     {
         ndat->vecdata_firstnode = new VecData<int>(mode, pi.firstnode, cdat->n_real_output);
@@ -39,11 +62,10 @@ void setup_permute_info(HelioXroupData *ndat, coreneuron::CoreData *cdat, Permut
     }
 }
 
-void initGroupData(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
+void initGroupData(Mode mode, NeuronGroupData *ndat, coreneuron::CoreData *cdat)
 {
     int ncell = cdat->n_real_cell;
     int len = cdat->end;
-    printf("ncell=%d len=%d\n",ncell,len);
 
     ndat->ncell = ncell;
     ndat->len = cdat->end;
@@ -78,9 +100,16 @@ void initGroupData(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
     ndat->need_fast_imem = need_fast_imem;
     if (need_fast_imem)
     {
-        ndat->vecdata_sav_rhs = new VecData<double>(mode, 0.0, len);
-        ndat->vecdata_sav_d = new VecData<double>(mode, 0.0, len);
-        ndat->vecdata_i_membrane_ = new VecData<double>(mode, 0.0, len);
+        // NOTE(temporary guard):
+        // fast_imem/i_membrane_ semantics are currently not fully aligned with NEURON
+        // when ELECTRODE_CURRENT pathways are involved. To avoid silent numerical mismatch,
+        // fail-fast as soon as model import requires i_membrane_ support.
+        std::fprintf(stderr,
+                     "\nFATAL: Detected POINTER target to i_membrane_ (fast_imem path required),\n"
+                     "but fast_imem is temporarily disabled in NeuronG to avoid semantic mismatch.\n"
+                     "Please review and complete fast_imem support before using i_membrane_.\n"
+                     "See: docs/FAST_IMEM_EXPLAINED.md\n\n");
+        std::abort();
     }
 
     ndat->spk_vec = new SpikeVector(cdat->n_presyn);
@@ -94,10 +123,10 @@ void initGroupData(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
     memset(ndat->type2articell_ix, -1, sizeof(int) * mech_num);
 }
 
-void initMechList(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
+void initMechList(Mode mode, NeuronGroupData *ndat, coreneuron::CoreData *cdat)
 {
-    // 将CoreNeuron中读出来的Mech给转换成HelioX内部的Mech形式
-    //  ml: mechanism from CoreNEURON data, mech: mechanism of HelioX
+    // 将CoreNeuron中读出来的Mech给转换成NeuronG内部的Mech形式
+    //  ml: mechanism from CoreNEURON data, mech: mechanism of NeuronG
     MechInitParams mechParam = {.mode = mode};
     bool mech_not_found = false;
     vector<string> not_found_mech_list;
@@ -118,6 +147,7 @@ void initMechList(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
         mechParam.permute = ml->permute;
         mechParam.pointer2type = ml->pointer2type.empty() ? nullptr : &ml->pointer2type;
         mechParam.dparam_semantics = MechanismFactory::getInstance().getDparamSemantics(mech_name);
+        mechParam.create_as_generic_ion = cdat->mech_data->is_ion[mech_type];
 
         if(cdat->mech_data->nrn_array_dims[mech_type].size() > 0)
             mechParam.array_dims = &cdat->mech_data->nrn_array_dims[mech_type];//这个是一个指针，指向一个vector<int>，里面存放了每个变量的维度
@@ -205,44 +235,31 @@ void initMechList(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
         }
         exit(1);
     }
-    // 打印结果进行验证
-    for (auto mech_ptr : ndat->mechanism_list)
-    {
-        printf("mech_name=%s\n", mech_ptr->name.c_str());
-    }
 
-    const char* order_env = std::getenv("HELIOX_FORCE_MECH_ORDER");
-    if (order_env && ndat->mech_current_list.size() > 1) {
-        std::string mode_str(order_env);
-        if (mode_str == "type") {
-            std::stable_sort(ndat->mech_current_list.begin(),
-                             ndat->mech_current_list.end(),
-                             [](Mechanism* a, Mechanism* b) { return a->type < b->type; });
-            printf("HELIOX_FORCE_MECH_ORDER=type applied to mech_current_list\n");
-        } else if (mode_str == "name") {
-            std::stable_sort(ndat->mech_current_list.begin(),
-                             ndat->mech_current_list.end(),
-                             [](Mechanism* a, Mechanism* b) { return a->name < b->name; });
-            printf("HELIOX_FORCE_MECH_ORDER=name applied to mech_current_list\n");
-        }
-    }
 }
 
-static void initMechPointers(HelioXroupData* ndat, coreneuron::CoreData* cdat) {
+static void initMechPointers(NeuronGroupData* ndat, coreneuron::CoreData* cdat) {
     // Resolve POINTER targets after all mechanisms exist and mech_var_table is populated.
     for (auto* mech : ndat->mechanism_list) {
-        mech->resolve_pointers(ndat, cdat);
+        mech->resolve_pointers(MechPointerResolveContext{
+            .neuron_group_data = ndat,
+            .core_data = cdat,
+        });
     }
     for (auto* mech : ndat->vec_eion) {
-        mech->resolve_pointers(ndat, cdat);
+        mech->resolve_pointers(MechPointerResolveContext{
+            .neuron_group_data = ndat,
+            .core_data = cdat,
+        });
     }
 }
 
-void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
+void initSynapse(Mode mode, NeuronGroupData *ndat, coreneuron::CoreData *cdat, double dt_ms)
 {
     // 初始化synapse
     printf_debug("postsyn_n=%ld articell_n=%ld \n", ndat->vec_postsyn.size(), ndat->vec_articell.size());
 
+    const double delay_dt_ms = valid_delay_dt_ms(dt_ms);
     int n_arti = ndat->vec_articell.size();
 
     double *weights;
@@ -265,15 +282,6 @@ void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
     threshold.resize(npre_real);
     pre_gids.resize(npre_real);
 
-    // Debug logging for presyn (can be extremely verbose for large models).
-    // Enable explicitly to avoid slowing down initialization and flooding stdout.
-    const char* dbg_presyn_env = std::getenv("HELIOX_DEBUG_PRESYN");
-    const bool debug_presyn = dbg_presyn_env && dbg_presyn_env[0] != '0';
-    int debug_presyn_limit = 10;
-    if (const char* lim = std::getenv("HELIOX_DEBUG_PRESYN_LIMIT"); lim && lim[0]) {
-        debug_presyn_limit = std::max(0, std::atoi(lim));
-    }
-
     int ipre = 0;
     // spk_vec: 0 -- npre_real-1 real cell, npre_real -- n_presyn arti-cell
     for (int i = 0; i < cdat->n_presyn; i++)
@@ -289,7 +297,7 @@ void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
         if (!is_arti) 
         {
             //实际上，在coreNeuron中，是保证了前n_real_presyn个presyn都是实际的细胞
-            //但是历史遗留问题，heliox用了不同的判断方式，因此，现在用assert来确保不会出毛病
+            //但是历史遗留问题，neurong用了不同的判断方式，因此，现在用assert来确保不会出毛病
             //否则的话，现在可能会导致真实的spk vec offset和arti cell的spk vec offset冲突，这就出问题了
             assert(ipre < npre_real);
             assert(i == ipre);
@@ -297,19 +305,6 @@ void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
             threshold[ipre] = ps->threshold;
             real_spk_vec_offset[ipre] = ipre; // Note:此时认为，所有的非人工Cell都在前面
             pre_gids[ipre] = gid;
-            if (debug_presyn) {
-                // Print only a small prefix/suffix to keep logs readable for large models.
-                if (debug_presyn_limit <= 0 ||
-                    ipre < debug_presyn_limit ||
-                    ipre >= (static_cast<int>(npre_real) - debug_presyn_limit)) {
-                    printf_debug("RealPresyn[%d][%d]: pre_node_indices[%d] threshold[%lf] gid[%d]\n",
-                                 i, ipre, pre_node_indices[ipre], threshold[ipre], gid);
-                } else if (ipre == debug_presyn_limit) {
-                    printf_debug("RealPresyn: ... suppressed (npre_real=%u, set HELIOX_DEBUG_PRESYN_LIMIT to change) ...\n",
-                                 npre_real);
-                }
-            }
-
             ipre++;
         }
         else // artificial cell
@@ -322,7 +317,7 @@ void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
         }
     }
 
-    // setup presyn in HelioXroupData, fill in the
+    // setup presyn in NeuronGroupData, fill in the
     // values of threshold, pre_node_indices
     ndat->presyn = new PreSyn(mode, npre_real, ndat->spk_vec,
                               pre_node_indices, threshold,
@@ -358,9 +353,12 @@ void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
                 auto postsyn = ndat->vec_postsyn[ipost];
                 uint32_t *spk_vec_idx = postsyn->vecdata_spk_vec_idx->get_cpu_data();
                 double *delay = postsyn->vecdata_delay->get_cpu_data();
+                int *delay_steps = postsyn->vecdata_delay_steps->get_cpu_data();
                 double *weights = postsyn->vecdata_weights->get_cpu_data();
                 spk_vec_idx[i_instance] = i;
-                delay[i_instance] = p_nc->delay;
+                const int delay_step = quantize_delay_step_for_dt(p_nc->delay, delay_dt_ms);
+                delay[i_instance] = static_cast<double>(delay_step) * delay_dt_ms;
+                delay_steps[i_instance] = delay_step;
                 weights[i_instance] = cdat->weights[p_nc->weight_index];
             }
             else
@@ -377,6 +375,7 @@ void initSynapse(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
             auto post_syn = ndat->vec_postsyn[i];
             post_syn->vecdata_spk_vec_idx->update_gpu_data_from_cpu();
             post_syn->vecdata_delay->update_gpu_data_from_cpu();
+            post_syn->vecdata_delay_steps->update_gpu_data_from_cpu();
             post_syn->vecdata_weights->update_gpu_data_from_cpu();
         }
     }
@@ -415,7 +414,33 @@ std::tuple<double *, double *> getMechVarPtrByLagacyIndex(int mech_type,int inde
     return make_tuple(var_data.cpu_data + actual_offset, var_data.gpu_data + actual_offset);
 }
 
-void initGapTrans(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
+static std::string canonicalGapDescriptorVarName(const std::string& mech_name, const std::string& var_name){
+    const std::string prefix = mech_name + "_";
+    if(var_name.rfind(prefix, 0) == 0){
+        return var_name.substr(prefix.size());
+    }
+    return var_name;
+}
+
+VarDescriptor getGapVarDescriptorByLegacyIndex(int var_type, int index, coreneuron::CoreData *cdat){
+    if(var_type == static_cast<int>(coreneuron::gap_idx_type::voltage)){
+        return VarDescriptor("global", "v", index, 0);
+    }
+
+    assert(var_type >= 2);
+    assert(mech_var_table.contains(var_type));
+    auto &mech_var_map = mech_var_table[var_type];
+    auto [mech_i, variable_index, array_index] = legacy2soaos_index(index, cdat->mech_data->nrn_array_dims[var_type]);
+    assert(mech_var_map.contains(variable_index));
+
+    auto &var_data = mech_var_map[variable_index];
+    // Keep the raw legacy instance index here. getVarPtr/getVjpAdjointPtr apply
+    // the mechanism permutation when resolving the descriptor.
+    const std::string& mech_name = cdat->mech_data->name_vec[var_type];
+    return VarDescriptor(mech_name, canonicalGapDescriptorVarName(mech_name, var_data.name), mech_i, array_index);
+}
+
+void initGapTrans(Mode mode, NeuronGroupData *ndat, coreneuron::CoreData *cdat)
 {
     if(cdat->gap_transfer == nullptr){
         ndat->have_gap = false;
@@ -435,9 +460,13 @@ void initGapTrans(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
     // 使用VecData的reserve方法预分配空间，然后逐个push_back
     cpu_gap.src.reserve(ntrans);
     cpu_gap.dst.reserve(ntrans);
+    cpu_gap.src_desc.reserve(ntrans);
+    cpu_gap.dst_desc.reserve(ntrans);
     if (mode == GPU) {
         gpu_gap.src.reserve(ntrans);
         gpu_gap.dst.reserve(ntrans);
+        gpu_gap.src_desc.reserve(ntrans);
+        gpu_gap.dst_desc.reserve(ntrans);
     }
 
     using enum coreneuron::gap_idx_type;
@@ -448,6 +477,8 @@ void initGapTrans(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
         double* dst_cpu_ptr = nullptr;
         double* src_gpu_ptr = nullptr;
         double* dst_gpu_ptr = nullptr;
+        const VarDescriptor src_desc = getGapVarDescriptorByLegacyIndex(src_type, src_index, cdat);
+        const VarDescriptor dst_desc = getGapVarDescriptorByLegacyIndex(dst_type, dst_index, cdat);
         
         // 处理源指针
         if(src_type == static_cast<int>(voltage)){
@@ -488,11 +519,9 @@ void initGapTrans(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
         }
         
         // 添加到VecData
-        cpu_gap.src.push_back(src_cpu_ptr);
-        cpu_gap.dst.push_back(dst_cpu_ptr);
+        cpu_gap.add_gap(src_cpu_ptr, dst_cpu_ptr, src_desc, dst_desc);
         if(mode == GPU){
-            gpu_gap.src.push_back(src_gpu_ptr);
-            gpu_gap.dst.push_back(dst_gpu_ptr);
+            gpu_gap.add_gap(src_gpu_ptr, dst_gpu_ptr, src_desc, dst_desc);
         }
     };
 
@@ -528,7 +557,7 @@ void initGapTrans(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat)
     }
 
 }
-void initVecPlay(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat){
+void initVecPlay(Mode mode, NeuronGroupData *ndat, coreneuron::CoreData *cdat){
     for(auto &vecplay_core:cdat->vec_play_continuous_core){
         auto mtype = vecplay_core.mtype;
         auto ix = vecplay_core.ix;
@@ -566,18 +595,13 @@ void initVecPlay(Mode mode, HelioXroupData *ndat, coreneuron::CoreData *cdat){
  * build up data structures used in simulation from CoreNEURON data
  * 输入是cdat,然后输出是ndat
  */
-void init_neurondata_from_coredat(HelioXroupData *ndat, coreneuron::CoreData *cdat, Mode mode)
+void init_neurondata_from_coredat(NeuronGroupData *ndat, coreneuron::CoreData *cdat, Mode mode, double dt)
 {
     initGroupData(mode, ndat, cdat);
-    printf("initGroupData done\n");
     initMechList(mode, ndat, cdat);
-    printf("initMechList done\n");
     initMechPointers(ndat, cdat);
-    printf("initMechPointers done\n");
-    initSynapse(mode, ndat, cdat);
-    printf("initSynapse done\n");
+    initSynapse(mode, ndat, cdat, dt);
     initGapTrans(mode, ndat, cdat);
-    printf("initGapTrans done\n");
     initVecPlay(mode, ndat, cdat);
     
     if (cdat->permute)
@@ -588,16 +612,16 @@ void init_neurondata_from_coredat(HelioXroupData *ndat, coreneuron::CoreData *cd
     }
 }
 
-void data_format_trans(vector<HelioXroupData *> &neuron_group_list, unique_ptr<coreneuron::CoreData *[]> &coredata_arr, int ngroup, Mode mode, double dt)
+void data_format_trans(vector<NeuronGroupData *> &neuron_group_list, unique_ptr<coreneuron::CoreData *[]> &coredata_arr, int ngroup, Mode mode, double dt)
 {
     // neuron_group_list.resize(ngroup);
     printf_debug("ngroup=%d\n", ngroup);
     assert(ngroup == 1);
     for (int i = 0; i < ngroup; i++)
     {
-        HelioXroupData *neuron_data = new HelioXroupData(mode,dt);
+        NeuronGroupData *neuron_data = new NeuronGroupData(mode,dt);
         neuron_group_list.push_back(neuron_data);
-        init_neurondata_from_coredat(neuron_group_list[i], coredata_arr[i], mode);
+        init_neurondata_from_coredat(neuron_group_list[i], coredata_arr[i], mode, dt);
         MechanismFactory::getInstance().registerVarMap("global", neuron_group_list[i]);
     }
 }

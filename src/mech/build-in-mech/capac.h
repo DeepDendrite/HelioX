@@ -31,5 +31,3 @@ class Capac : public Mechanism
 
         
 };
-REGISTER_MECHANISM("capacitance",Capac);
-

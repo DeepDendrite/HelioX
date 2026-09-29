@@ -1,7 +1,5 @@
 build/
 build-*/
-build_sys/
-build_*/
 build_hash*/
 deps/
 model_data/
@@ -11,9 +9,7 @@ model_data/
 *.json
 src/*.json
 src/.cache
-heliox_exec
-# Internal docs (do not publish)
-docs/
+neurong_exec
 # Devenv
 .devenv*
 devenv.local.nix
@@ -27,10 +23,6 @@ devenv.local.nix
 python_lib/__pycache__/
 __pycache__/
 *.pyc
-python_lib/*.so
-
-# Internal tutorials
-src/mech/AI看的mech翻译教程.md
 python_lib/mod/
 python_lib/x86_64/
 python_lib/output/
@@ -39,3 +31,4 @@ output/
 x86_64/
 *.png
 milestones_20260118/
+.omx/

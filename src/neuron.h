@@ -2,6 +2,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
+#include <memory>
 #include <vector>
 #include <map>
 #include <highfive/highfive.hpp>
@@ -13,14 +14,16 @@
 #include "magic_enum/magic_enum.hpp"
 #include "vecplay.h"
 #include "vecevent.h"
+#include "spike_vjp_surrogate.h"
 
 using namespace std;
 
-class HelioXroupData:public VarMapAble
+class NeuronGroupData:public VarMapAble
 {
     public:
-        HelioXroupData(Mode mode, double dt);
-        ~HelioXroupData();
+        NeuronGroupData(Mode mode, double dt);
+        ~NeuronGroupData();
+        static void operator delete(void* p) noexcept;
         Mode mode;
         int len;//node数量
         int ncell;
@@ -34,6 +37,31 @@ class HelioXroupData:public VarMapAble
         //变量，每次计算前清空重算
         VecData<double>* vecdata_d;//对角线元素
         VecData<double>* vecdata_rhs;//右手侧，在矩阵构建完的时候，是电流，解完之后，就是电压了
+        struct VoltageVjpWorkspace {
+            bool prepared = false;
+            Mode mode = CPU;
+            int len = 0;
+            int ncell = 0;
+            int step_count = 0;
+            double dt_ms = 0.0;
+            int local_loss_input_count = 0;
+            std::vector<Mechanism*> current_vjp_mechs;
+            std::vector<PostSyn_trait*> spike_vjp_postsyns;
+            VecData<double> carry_v;
+            VecData<double> d_const;
+            VecData<double> local_loss_input;
+            VecData<int> local_loss_input_index;
+            VecData<double*> gap_vjp_src_adj;
+            VecData<double*> gap_vjp_dst_adj;
+            int gap_vjp_trans_count = 0;
+            int spike_vjp_pre_count = 0;
+            bool spike_vjp_has_zero_delay_edge = false;
+            const neurong::spike_vjp::SpikeVjpSurrogateOps* spike_vjp_surrogate_ops = nullptr;
+            neurong::spike_vjp::SpikeVjpSurrogateConfig spike_vjp_surrogate_config;
+            VecData<double> spike_vjp_pre_v_tape;
+            VecData<double> spike_vjp_pending_pre_spike_adj;
+        };
+        std::unique_ptr<VoltageVjpWorkspace> vjp_workspace;
         // fast_imem support (NEURON i_membrane_ / FastIMemSavRHS):
         // - vecdata_sav_rhs / vecdata_sav_d store the membrane-only RHS/diagonal contribution
         //   (without axial terms), in the same units used by the solver (mA/cm2 and Jacobian units).
@@ -45,6 +73,8 @@ class HelioXroupData:public VarMapAble
 
         //会被初始化，然后迭代更新
         VecData<double>* vecdata_v;//电压值，会被finitialize初始化成v_init，默认是-65.0
+        // 可选：每个node的初始化电压覆盖（NaN表示使用finitialize(v_init)的传入值）
+        VecData<double>* vecdata_v_init_override = nullptr;
 
         PreSyn* presyn;//这部分是单个结构体，但是里面存放了很多信息，不是单个presyn，而postsyn在下面，是单独的vec
         Capac* mech_cap;//好像只有一个，指向膜电容这个mech，然后在lhs和update的时候会调用这个的函数，所以单独抽出来了
@@ -52,6 +82,7 @@ class HelioXroupData:public VarMapAble
         VecEvent* mech_vecevent = nullptr;// vecevnet的指针，只可能有一个，用于play方法
 
         vector<Mechanism*> mech_write_state_ion_list;//有的Mech在计算State的时候会写离子浓度，这些需要提前计算
+        vector<Mechanism*> mech_ion_species_list;//离子池/浓度模型机制（单独调度）
         vector<Mechanism*> mechanism_list;//所有机制的列表，不包含eion类型的，因为eion必须提前于所有的mech计算离子浓度
         vector<Mechanism*> mech_current_list;//保持CoreNEURON mechnism顺序，用于current计算
         vector<ArtiCell*> vec_articell; // 人工细胞的列表，articell同时继承了postsyn，所以也会加到下面postsyn列表里
@@ -82,6 +113,8 @@ class HelioXroupData:public VarMapAble
         struct GapTransInfo{
             VecData<double*> src;
             VecData<double*> dst;
+            std::vector<VarDescriptor> src_desc;
+            std::vector<VarDescriptor> dst_desc;
             bool pending;  // GPU模式下标记是否需要同步
             
             GapTransInfo(Mode mode = CPU) : src(mode), dst(mode), pending(false) {}
@@ -97,6 +130,22 @@ class HelioXroupData:public VarMapAble
                 dst.push_back(dst_ptr);
                 pending = true;  // 添加后总是标记为pending，在sync_to_gpu时会根据mode决定是否真的同步
             }
+
+            void add_gap(double* src_ptr,
+                         double* dst_ptr,
+                         const VarDescriptor& source,
+                         const VarDescriptor& target) {
+                src.push_back(src_ptr);
+                dst.push_back(dst_ptr);
+                src_desc.push_back(source);
+                dst_desc.push_back(target);
+                pending = true;
+            }
+
+            bool has_descriptors() const {
+                return src_desc.size() == static_cast<std::size_t>(src.size()) &&
+                       dst_desc.size() == static_cast<std::size_t>(dst.size());
+            }
             
             // GPU模式下同步数据
             void sync_to_gpu() {
@@ -111,6 +160,8 @@ class HelioXroupData:public VarMapAble
             void clear() {
                 src.clear();
                 dst.clear();
+                src_desc.clear();
+                dst_desc.clear();
                 pending = false;
             }
         };
@@ -127,4 +178,3 @@ class HelioXroupData:public VarMapAble
         //提供变量名称和下标，到对应的变量的映射
         virtual double* getVarPtr(const VarDescriptor& descriptor, Mode mode) override;
 };
-

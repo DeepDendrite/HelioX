@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def resolve_package_dir(prefix: Path) -> Path | None:
+    env_path = None
+    if "NEURONG_CMAKE_PACKAGE_DIR" in os.environ:
+        raw = os.environ["NEURONG_CMAKE_PACKAGE_DIR"].strip()
+        if raw:
+            env_path = Path(raw).resolve()
+            if env_path.is_dir():
+                return env_path
+
+    for direct in (
+        prefix / "lib" / "cmake" / "NeuronGSDK",
+        prefix / "lib64" / "cmake" / "NeuronGSDK",
+    ):
+        if direct.is_dir():
+            return direct
+
+    for candidate in sorted(prefix.glob("**/cmake/NeuronGSDK")):
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    return env_path
+
+
+PLUGIN_INIT_SYMBOL_PATTERN = re.compile(
+    r"\b(?:"
+    r"neurong_mech_plugin_init|"
+    r"NEURONG_DECLARE_MECH_PLUGIN_INIT|"
+    r"NEURONG_DEFINE_MECH_PACKAGE_PLUGIN"
+    r")\b"
+)
+LINE_COMMENT_PATTERN = re.compile(r"//.*?$", re.MULTILINE)
+BLOCK_COMMENT_PATTERN = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def plugin_source_files(mech_dir: Path) -> list[Path]:
+    return sorted(
+        path for path in mech_dir.iterdir()
+        if path.is_file() and path.suffix in {".cpp", ".cc", ".cxx", ".cu"}
+    )
+
+
+def strip_comments(source_text: str) -> str:
+    without_block_comments = BLOCK_COMMENT_PATTERN.sub("", source_text)
+    return LINE_COMMENT_PATTERN.sub("", without_block_comments)
+
+
+def detect_explicit_plugin_init(mech_dir: Path) -> Path | None:
+    for source in plugin_source_files(mech_dir):
+        try:
+            contents = source.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if PLUGIN_INIT_SYMBOL_PATTERN.search(strip_comments(contents)):
+            return source
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build a NeuronG mech plugin from a local source directory.")
+    parser.add_argument("mech_dir", nargs="?", default="mech", help="Mechanism source directory (default: ./mech)")
+    parser.add_argument("--output-dir", default="build-mech", help="Output directory (default: ./build-mech)")
+    parser.add_argument("--name", default="neurong_mechs", help="Output library base name (default: neurong_mechs)")
+    parser.add_argument("--plugin-name", default=None, help="Plugin metadata name (default: output library base name)")
+    parser.add_argument("--plugin-version", default="0.1.0", help="Plugin metadata version (default: 0.1.0)")
+    args = parser.parse_args()
+
+    prefix = Path(__file__).resolve().parent.parent
+    mech_dir = Path(args.mech_dir).resolve()
+    output_dir = Path(args.output_dir).resolve()
+    build_dir = output_dir / "build"
+    generated_dir = output_dir / "cmake-src"
+    cmake_package_dir = resolve_package_dir(prefix)
+    template_path = prefix / "share" / "neurong" / "mech" / "CMakeLists.plugin.in"
+    contract_path = prefix / "share" / "neurong" / "mech" / "toolchain-contract.cmake"
+    plugin_init_template = prefix / "share" / "neurong" / "mech" / "plugin_init.cpp.in"
+
+    if not mech_dir.is_dir():
+        print(f"neurong-mech-build: mech source directory not found: {mech_dir}", file=sys.stderr)
+        return 2
+    if not template_path.is_file():
+        print(f"neurong-mech-build: template not found: {template_path}", file=sys.stderr)
+        return 2
+    if not plugin_init_template.is_file():
+        print(f"neurong-mech-build: plugin entry template not found: {plugin_init_template}", file=sys.stderr)
+        return 2
+    if cmake_package_dir is None or not cmake_package_dir.is_dir():
+        print(f"neurong-mech-build: NeuronGSDK package directory not found: {cmake_package_dir}", file=sys.stderr)
+        return 2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    output_lib_dir = output_dir
+    plugin_name = args.plugin_name or args.name
+
+    explicit_plugin_init = detect_explicit_plugin_init(mech_dir)
+
+    generated_plugin_init = ""
+    if explicit_plugin_init is None:
+        plugin_init_contents = plugin_init_template.read_text(encoding="utf-8")
+        plugin_init_contents = plugin_init_contents.replace("@NEURONG_PLUGIN_NAME@", plugin_name)
+        plugin_init_contents = plugin_init_contents.replace("@NEURONG_PLUGIN_VERSION@", args.plugin_version)
+        generated_plugin_path = generated_dir / "neurong_plugin_init.cpp"
+        generated_plugin_path.write_text(plugin_init_contents, encoding="utf-8")
+        generated_plugin_init = str(generated_plugin_path)
+
+    cmakelists = template_path.read_text(encoding="utf-8")
+    cmakelists = cmakelists.replace("@NEURONG_TOOLCHAIN_CONTRACT@", str(contract_path))
+    cmakelists = cmakelists.replace("@NEURONG_CMAKE_PACKAGE_DIR@", str(cmake_package_dir))
+    cmakelists = cmakelists.replace("@NEURONG_MECH_SOURCE_DIR@", str(mech_dir))
+    cmakelists = cmakelists.replace("@NEURONG_MECH_OUTPUT_NAME@", args.name)
+    cmakelists = cmakelists.replace("@NEURONG_MECH_OUTPUT_DIR@", str(output_lib_dir))
+    cmakelists = cmakelists.replace("@NEURONG_GENERATED_PLUGIN_INIT@", generated_plugin_init)
+    (generated_dir / "CMakeLists.txt").write_text(cmakelists, encoding="utf-8")
+
+    cmake_cmd = ["cmake", "-S", str(generated_dir), "-B", str(build_dir)]
+    build_cmd = ["cmake", "--build", str(build_dir)]
+
+    print(f"[neurong-mech-build] prefix={prefix}")
+    print(f"[neurong-mech-build] mech_dir={mech_dir}")
+    print(f"[neurong-mech-build] output_dir={output_dir}")
+    print(f"[neurong-mech-build] build_dir={build_dir}")
+    if explicit_plugin_init is not None:
+        print(f"[neurong-mech-build] using explicit plugin entry source {explicit_plugin_init}")
+    else:
+        print(f"[neurong-mech-build] generated plugin entry for name={plugin_name} version={args.plugin_version}")
+
+    for tool in ("cmake",):
+        if shutil.which(tool) is None:
+            print(f"neurong-mech-build: required tool not found in PATH: {tool}", file=sys.stderr)
+            return 2
+
+    subprocess.run(cmake_cmd, check=True)
+    subprocess.run(build_cmd, check=True)
+
+    built_lib = output_dir / f"lib{args.name}.so"
+    if not built_lib.is_file():
+        print(f"neurong-mech-build: build completed but output not found: {built_lib}", file=sys.stderr)
+        return 1
+
+    print(f"[neurong-mech-build] built {built_lib}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
